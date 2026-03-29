@@ -50,11 +50,13 @@ export class LlamaBackend {
 
     // Serialize access — only one inference at a time on this context
     if (this._busy) {
-      // Wait for current inference to finish
-      await new Promise(resolve => {
+      // Wait for current inference to finish, but with a timeout
+      await new Promise((resolve, reject) => {
+        const start = Date.now();
         const check = () => {
           if (!this._busy) return resolve();
-          setTimeout(check, 100);
+          if (Date.now() - start > 90000) return reject(new Error('Inference queue timeout (90s)'));
+          setTimeout(check, 200);
         };
         check();
       });

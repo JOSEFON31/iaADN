@@ -84,27 +84,44 @@ export class API {
       return this._json(res, { error: 'Missing "message" field' }, 400);
     }
 
-    // Route through hive mind
-    if (this.hiveMind) {
-      const result = await this.hiveMind.query(message);
-      return this._json(res, {
-        response: result.response,
-        metadata: result.metadata,
-      });
-    }
-
-    // Fallback: direct inference
+    // Direct inference — fast path, single inference call
+    // (HiveMind decompose+distribute is too slow on low-end hardware for interactive chat)
     if (this.inferenceEngine?.ready) {
       const best = this.population?.getBest?.();
       const systemPrompt = best?.genome?.getSystemPrompt() || '';
-      const result = await this.inferenceEngine.complete(
-        [{ role: 'user', content: message }],
-        { systemPrompt, maxTokens: 512 }
-      );
-      return this._json(res, {
-        response: result.content,
-        metadata: { mode: 'direct', model: result.model },
-      });
+      const config = best?.genome?.getInferenceConfig() || {};
+
+      try {
+        // Wrap in timeout to prevent infinite hang
+        const result = await Promise.race([
+          this.inferenceEngine.complete(
+            [{ role: 'user', content: message }],
+            {
+              systemPrompt,
+              temperature: config.temperature || 0.7,
+              maxTokens: 256,
+            }
+          ),
+          new Promise((_, reject) =>
+            setTimeout(() => reject(new Error('Inference timeout (120s)')), 120000)
+          ),
+        ]);
+
+        return this._json(res, {
+          response: result.content,
+          metadata: {
+            mode: 'direct',
+            model: result.model,
+            instanceId: best?.genome?.instanceId || null,
+            fitness: best?.fitness || null,
+          },
+        });
+      } catch (err) {
+        return this._json(res, {
+          response: `[iaADN] Error: ${err.message}`,
+          metadata: { mode: 'error' },
+        });
+      }
     }
 
     return this._json(res, {
