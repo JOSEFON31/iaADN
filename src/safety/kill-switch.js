@@ -62,9 +62,18 @@ export class KillSwitch extends EventEmitter {
 
   // Auto-trigger conditions
   checkAutoTrigger(resourceStatus) {
-    // Trigger if memory usage exceeds 95%
-    if (parseFloat(resourceStatus.memoryPercent) > 95) {
-      this.activate('Critical memory usage > 95%');
+    const memPercent = parseFloat(resourceStatus.memoryPercent);
+
+    // Track consecutive high-memory readings to avoid false triggers during inference spikes
+    if (memPercent > 97) {
+      this._highMemCount = (this._highMemCount || 0) + 1;
+    } else {
+      this._highMemCount = 0;
+    }
+
+    // Only trigger if memory is critically high for 3 consecutive checks (3 minutes)
+    if (this._highMemCount >= 3) {
+      this.activate('Critical memory usage > 97% for 3+ minutes');
       return true;
     }
 

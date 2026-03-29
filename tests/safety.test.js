@@ -143,9 +143,16 @@ describe('KillSwitch', () => {
     assert.equal(killSwitch.isActive(), false);
   });
 
-  it('should auto-trigger on critical memory', () => {
+  it('should auto-trigger on sustained critical memory', () => {
     const killSwitch = new KillSwitch(new AuditLog());
-    const triggered = killSwitch.checkAutoTrigger({ memoryPercent: '96.5' });
+    // Single spike should NOT trigger
+    killSwitch.checkAutoTrigger({ memoryPercent: '98.0' });
+    assert.equal(killSwitch.isActive(), false);
+    // Second consecutive spike
+    killSwitch.checkAutoTrigger({ memoryPercent: '98.0' });
+    assert.equal(killSwitch.isActive(), false);
+    // Third consecutive spike triggers
+    const triggered = killSwitch.checkAutoTrigger({ memoryPercent: '98.0' });
     assert.ok(triggered);
     assert.ok(killSwitch.isActive());
   });

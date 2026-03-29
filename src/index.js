@@ -143,7 +143,7 @@ class IaADN {
 
   // Create the first generation of AI instances
   async createGenesisPopulation() {
-    const popSize = Math.min(this.config.evolution.populationSize, 3); // start small
+    const popSize = Math.min(this.config.evolution.populationSize, 2); // start small, scale up via replication
     console.log(`[Genesis] Creating ${popSize} initial instance(s)...`);
 
     for (let i = 0; i < popSize; i++) {

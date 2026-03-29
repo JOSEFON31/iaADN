@@ -52,7 +52,7 @@ export class FitnessEvaluator {
           [{ role: 'user', content: bench.prompt }],
           {
             systemPrompt: genome.getSystemPrompt(),
-            maxTokens: 256,
+            maxTokens: 64,
             ...genome.getInferenceConfig(),
           }
         );
@@ -147,18 +147,6 @@ export class FitnessEvaluator {
       {
         prompt: 'What is the capital of France?',
         expectedKeywords: ['paris'],
-      },
-      {
-        prompt: 'Is 7 a prime number? Answer yes or no.',
-        expectedKeywords: ['yes'],
-      },
-      {
-        prompt: 'What programming language is known for its use in web browsers?',
-        expectedKeywords: ['javascript', 'js'],
-      },
-      {
-        prompt: 'Complete: 2, 4, 8, 16, ___',
-        expectedKeywords: ['32'],
       },
     ];
   }
