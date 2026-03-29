@@ -1,0 +1,12 @@
+node_modules/
+*.log
+.env
+
+# Data - exclude generated content, keep directory structure
+data/models/*.gguf
+data/config.json
+data/audit/*.jsonl
+data/genomes/*.json
+data/snapshots/*
+data/training/*
+!data/**/.gitkeep

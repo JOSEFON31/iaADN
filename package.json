@@ -1,0 +1,28 @@
+{
+  "name": "iaadn",
+  "version": "0.1.0",
+  "description": "iaADN - Decentralized self-evolving AI system with hive mind architecture",
+  "main": "src/index.js",
+  "type": "module",
+  "scripts": {
+    "start": "node src/index.js",
+    "test": "node --test tests/**/*.test.js",
+    "daemon": "node src/index.js --daemon"
+  },
+  "keywords": [
+    "decentralized-ai",
+    "evolutionary",
+    "hive-mind",
+    "self-programming",
+    "swarm-intelligence",
+    "p2p"
+  ],
+  "dependencies": {
+    "node-llama-cpp": "^3.6.0",
+    "acorn": "^8.14.0",
+    "acorn-walk": "^8.3.4"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}
