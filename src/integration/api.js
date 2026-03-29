@@ -92,9 +92,9 @@ export class API {
       const config = best?.genome?.getInferenceConfig() || {};
 
       try {
-        // Wrap in timeout to prevent infinite hang
+        // Use dedicated chat context — never blocked by daemon fitness evaluation
         const result = await Promise.race([
-          this.inferenceEngine.complete(
+          this.inferenceEngine.chatComplete(
             [{ role: 'user', content: message }],
             {
               systemPrompt,

@@ -160,7 +160,7 @@ describe('KillSwitch', () => {
 
 describe('ResourceLimits', () => {
   it('should track instance count', () => {
-    const limits = new ResourceLimits({ maxInstancesPerNode: 3 });
+    const limits = new ResourceLimits({ maxInstancesPerNode: 3, maxMemoryPercent: 99 });
     limits.registerInstance();
     limits.registerInstance();
     assert.ok(limits.canSpawnInstance().allowed);

@@ -55,6 +55,30 @@ export class InferenceEngine extends EventEmitter {
     return result;
   }
 
+  // Chat-specific inference — uses dedicated context, never blocked by daemon
+  async chatComplete(messages, options = {}) {
+    if (!this.ready) throw new Error('Engine not initialized');
+    if (!this.backend.chatComplete) return this.complete(messages, options);
+
+    const config = getConfig().inference;
+    const opts = {
+      temperature: options.temperature ?? config.defaultTemperature,
+      topP: options.topP ?? config.defaultTopP,
+      repeatPenalty: options.repeatPenalty ?? config.defaultRepeatPenalty,
+      maxTokens: options.maxTokens ?? config.maxTokens,
+      systemPrompt: options.systemPrompt || null,
+    };
+
+    const start = Date.now();
+    const result = await this.backend.chatComplete(messages, opts);
+    const elapsed = (Date.now() - start) / 1000;
+
+    this.stats.totalInferences++;
+    this.stats.totalTokens += result.tokensGenerated || 0;
+
+    return result;
+  }
+
   async benchmark(testPrompts = null) {
     const prompts = testPrompts || [
       'What is 2 + 2?',
