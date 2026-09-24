@@ -476,6 +476,27 @@ async function sendMessage() {
   inputEl.focus();
 }
 
+function el(tag, className, text) {
+  const node = document.createElement(tag);
+  if (className) node.className = className;
+  if (text != null) node.textContent = text;
+  return node;
+}
+
+// The API sends specialization as { domain: weight }; show the strongest one
+function topSpecialization(spec) {
+  if (!spec || typeof spec !== 'object') return 'general';
+  let best = 'general';
+  let bestWeight = -Infinity;
+  for (const [domain, weight] of Object.entries(spec)) {
+    if (typeof weight === 'number' && weight > bestWeight) {
+      best = domain;
+      bestWeight = weight;
+    }
+  }
+  return bestWeight === -Infinity ? 'general' : `${best} ${bestWeight.toFixed(2)}`;
+}
+
 // Poll status
 async function refreshStatus() {
   if (!apiToken) return;
@@ -488,22 +509,32 @@ async function refreshStatus() {
     document.getElementById('popCount').textContent = `Pop: ${data.population ?? 0}`;
     document.getElementById('inferenceStatus').textContent = `Inference: ${data.inferenceReady ? 'Ready' : 'Offline'}`;
 
-    // Render instances
+    // Render instances (built with textContent — no server data goes through innerHTML)
     const listEl = document.getElementById('instanceList');
+    listEl.replaceChildren();
     if (data.instances && data.instances.length > 0) {
-      listEl.innerHTML = data.instances.map(inst => `
-        <div class="instance-card">
-          <div class="id">${inst.id?.slice(0, 20) || '?'}</div>
-          <div class="meta">
-            <span>Gen ${inst.generation}</span>
-            <span>${inst.specialization || 'general'}</span>
-            <span>F: ${inst.fitness != null ? inst.fitness.toFixed(2) : '?'}</span>
-          </div>
-          <div class="fitness-bar"><div class="fill" style="width:${((inst.fitness || 0) * 100).toFixed(0)}%"></div></div>
-        </div>
-      `).join('');
+      for (const inst of data.instances) {
+        const card = el('div', 'instance-card');
+        card.append(el('div', 'id', inst.id?.slice(0, 20) || '?'));
+        const meta = el('div', 'meta');
+        meta.append(
+          el('span', null, `Gen ${inst.generation ?? '?'}`),
+          el('span', null, topSpecialization(inst.specialization)),
+          el('span', null, `F: ${typeof inst.fitness === 'number' ? inst.fitness.toFixed(2) : '?'}`),
+        );
+        card.append(meta);
+        const bar = el('div', 'fitness-bar');
+        const fill = el('div', 'fill');
+        const pct = Math.max(0, Math.min(100, (Number(inst.fitness) || 0) * 100));
+        fill.style.width = `${pct.toFixed(0)}%`;
+        bar.append(fill);
+        card.append(bar);
+        listEl.append(card);
+      }
     } else {
-      listEl.innerHTML = '<div class="instance-card" style="color:var(--text-dim)">No instances</div>';
+      const empty = el('div', 'instance-card', 'No instances');
+      empty.style.color = 'var(--text-dim)';
+      listEl.append(empty);
     }
   } catch (err) {
     if (err instanceof UnauthorizedError) return;
@@ -519,12 +550,19 @@ async function refreshLineage() {
     const res = await apiFetch('/api/lineage');
     const data = await res.json();
     const s = data.stats || {};
-    document.getElementById('lineageStats').innerHTML = `
-      Total births: ${s.totalBirths ?? 0}<br>
-      Total deaths: ${s.totalDeaths ?? 0}<br>
-      Living: ${s.livingCount ?? 0}<br>
-      Max generation: ${s.maxGeneration ?? 0}
-    `;
+    // Field names match Lineage.getStats() in src/genome/lineage.js
+    const lines = [
+      `Total births: ${s.total ?? 0}`,
+      `Total deaths: ${s.dead ?? 0}`,
+      `Living: ${s.living ?? 0}`,
+      `Max generation: ${s.currentGeneration ?? 0}`,
+    ];
+    const box = document.getElementById('lineageStats');
+    box.replaceChildren();
+    lines.forEach((line, i) => {
+      if (i > 0) box.append(document.createElement('br'));
+      box.append(line);
+    });
   } catch {
     document.getElementById('lineageStats').textContent = 'Unavailable';
   }
