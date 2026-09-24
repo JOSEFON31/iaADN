@@ -6,9 +6,10 @@ import { CrossoverEngine } from './crossover.js';
 import { SelectionEngine } from './selection.js';
 import { FitnessEvaluator } from './fitness.js';
 import { getConfig } from '../config.js';
+import { rng, getSeed } from '../util/rng.js';
 
 export class Population {
-  constructor({ guardian, lineage, auditLog }) {
+  constructor({ guardian, lineage, auditLog, persistence = null }) {
     this.instances = new Map(); // instanceId -> { genome, fitness, engine, alive }
     this.fitnessScores = new Map(); // instanceId -> score (0-1)
     this.generation = 0;
@@ -16,6 +17,7 @@ export class Population {
     this.guardian = guardian;
     this.lineage = lineage;
     this.auditLog = auditLog;
+    this.persistence = persistence; // optional PersistenceStore — durable history across restarts
 
     const config = getConfig().evolution;
     this.mutationEngine = new MutationEngine({
@@ -97,6 +99,7 @@ export class Population {
         this.fitnessScores.set(inst.genome.instanceId, result.overall);
         this.lineage.updateFitness(inst.genome.instanceId, result.overall);
         this.auditLog.logFitness(inst.genome.instanceId, result);
+        this.persistence?.recordFitnessDetail(inst.genome.instanceId, result);
       } catch (err) {
         // If evaluation fails, assign minimum fitness
         inst.fitness = 0.1;
@@ -171,6 +174,7 @@ export class Population {
     // 5. Record generation event
     const stats = this.getStats();
     this.auditLog.logGeneration(this.generation, stats);
+    this.persistence?.recordGeneration(this.generation, stats, getSeed());
 
     return {
       generation: this.generation,
@@ -192,7 +196,7 @@ export class Population {
       const [parentA, parentB] = this.selectionEngine.selectParents(genomes, this.fitnessScores);
 
       let child;
-      if (Math.random() < this.crossoverRate) {
+      if (rng.random() < this.crossoverRate) {
         // Crossover: combine two parents
         const metaGene = parentA.getGene('crossoverPreference');
         const strategy = metaGene?.value || 'uniform';

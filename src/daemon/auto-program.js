@@ -4,6 +4,7 @@
 
 import { CodeGenerator } from '../selfprog/code-generator.js';
 import { RollbackManager } from '../selfprog/rollback.js';
+import { rng } from '../util/rng.js';
 
 export class AutoProgram {
   constructor({ population, inferenceEngine, guardian, auditLog }) {
@@ -91,7 +92,7 @@ export class AutoProgram {
     if (!fitnessEntry?.data?.dimensions) {
       // No detailed fitness data, target a random dimension
       const dims = ['accuracy', 'speed', 'efficiency', 'specialization'];
-      return { dimension: dims[Math.floor(Math.random() * dims.length)], score: 0.5 };
+      return { dimension: rng.pick(dims), score: 0.5 };
     }
 
     const dims = fitnessEntry.data.dimensions;

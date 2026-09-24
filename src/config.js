@@ -39,6 +39,7 @@ const DEFAULT_CONFIG = {
 
   // Evolution
   evolution: {
+    seed: null, // RNG seed for reproducible runs — auto-generated on first boot if null
     populationSize: 5, // max instances per node
     tournamentSize: 3,
     elitismCount: 1, // top N always survive

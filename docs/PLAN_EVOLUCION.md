@@ -135,15 +135,21 @@ orquestador y la misma auditoría se aplican a cada respuesta individual del bro
 
 Cada fase termina con criterios de salida medibles. No pasar a la siguiente sin cumplirlos.
 
-### Fase 0 — Cimientos (1–2 semanas)
+### Fase 0 — Cimientos (1–2 semanas) ✅ implementada
 
 - Unificar estado de población: eliminar `this.population` de `src/index.js`, usar solo `Population`.
 - Persistencia real en SQLite (`better-sqlite3`): individuos, fitness histórico, linaje, interacciones.
-- Semilla aleatoria configurable y registrada por generación (reproducibilidad).
-- Modo "simulación rápida": ciclos en segundos con un backend mock, para probar la evolución sin LLM.
-- CI con `npm test` en cada push.
+  Ver `src/persistence/db.js` y `src/persistence/store.js`, conectado a través de `Lineage`/`Population`.
+- Semilla aleatoria configurable y registrada por generación (reproducibilidad). Ver `src/util/rng.js`
+  (`--seed=X` en el CLI, o `config.evolution.seed`); toda la aleatoriedad evolutiva (mutación, cruce,
+  selección, variación de génesis) pasa por este único punto.
+- Modo "simulación rápida": ciclos en segundos con un backend mock (`src/inference/mock-backend.js`),
+  para probar la evolución sin LLM real. Uso: `node src/index.js --simulate=100 --seed=X`.
+- CI con `npm test` en cada push (`.github/workflows/test.yml`, Node 20.x y 22.x).
 
-**Salida:** reiniciar el daemon recupera exactamente la misma población; 100 generaciones simuladas en < 1 min.
+**Salida:** reiniciar el daemon recupera exactamente la misma población (verificado); 100 generaciones
+simuladas en ~250ms (verificado, muy por debajo del objetivo de 1 min); misma semilla → misma curva de
+fitness generación a generación (verificado byte a byte en dos ejecuciones independientes).
 
 ### Fase 1 — Fitness que mida utilidad real (2–3 semanas) ← *la más importante*
 

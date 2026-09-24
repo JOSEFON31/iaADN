@@ -1,6 +1,8 @@
 // iaADN - Selection Engine: natural selection — who survives, who reproduces
 // Implements tournament selection, elitism, and survival of the fittest
 
+import { rng } from '../util/rng.js';
+
 export class SelectionEngine {
   constructor({ tournamentSize = 3, elitismCount = 1 } = {}) {
     this.tournamentSize = tournamentSize;
@@ -28,7 +30,7 @@ export class SelectionEngine {
     const indices = [];
 
     while (indices.length < k) {
-      const idx = Math.floor(Math.random() * population.length);
+      const idx = rng.int(0, population.length);
       if (!indices.includes(idx)) indices.push(idx);
     }
 
@@ -52,10 +54,10 @@ export class SelectionEngine {
     const totalFitness = fitnesses.reduce((sum, f) => sum + f, 0);
 
     if (totalFitness <= 0) {
-      return population[Math.floor(Math.random() * population.length)];
+      return population[rng.int(0, population.length)];
     }
 
-    let spin = Math.random() * totalFitness;
+    let spin = rng.random() * totalFitness;
     for (let i = 0; i < population.length; i++) {
       spin -= fitnesses[i];
       if (spin <= 0) return population[i];
@@ -94,7 +96,7 @@ export class SelectionEngine {
     const leftover = remaining.slice(fitnessSpotsCount);
 
     // Random for diversity
-    const shuffled = [...leftover].sort(() => Math.random() - 0.5);
+    const shuffled = [...leftover].sort(() => rng.random() - 0.5);
     nonEliteSurvivors.push(...shuffled.slice(0, randomSpotsCount));
 
     const survivors = [...elites, ...nonEliteSurvivors];

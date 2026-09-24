@@ -2,6 +2,7 @@
 // Like biological DNA mutations — small random changes that may improve or worsen fitness
 
 import { Gene, GENE_TYPES } from '../genome/gene.js';
+import { rng } from '../util/rng.js';
 
 export class MutationEngine {
   constructor({ mutationRate = 0.15, maxMagnitude = 0.2 } = {}) {
@@ -17,7 +18,7 @@ export class MutationEngine {
     for (const gene of allGenes) {
       // Each gene has a chance to mutate based on its mutability and the global rate
       const chance = this.mutationRate * gene.mutability;
-      if (Math.random() > chance) continue;
+      if (rng.random() > chance) continue;
 
       const mutation = this._mutateGene(gene);
       if (mutation) {
@@ -54,7 +55,7 @@ export class MutationEngine {
 
     if (typeof oldValue === 'number') {
       const magnitude = this.maxMagnitude * oldValue;
-      const delta = (Math.random() * 2 - 1) * magnitude;
+      const delta = (rng.random() * 2 - 1) * magnitude;
       let newValue = oldValue + delta;
 
       // Clamp known parameters to safe ranges
@@ -71,7 +72,7 @@ export class MutationEngine {
       };
       if (options[gene.name]) {
         const choices = options[gene.name];
-        gene.value = choices[Math.floor(Math.random() * choices.length)];
+        gene.value = rng.pick(choices);
         return { gene: gene.name, type: 'config_swap', oldValue, newValue: gene.value };
       }
     }
@@ -124,19 +125,19 @@ export class MutationEngine {
   // Simple text mutation operations
   _mutateText(text) {
     const words = text.split(' ');
-    const operation = Math.random();
+    const operation = rng.random();
 
     if (operation < 0.3 && words.length > 3) {
       // Delete a random word
-      const idx = Math.floor(Math.random() * words.length);
+      const idx = rng.int(0, words.length);
       words.splice(idx, 1);
     } else if (operation < 0.6) {
       // Swap two adjacent words
-      const idx = Math.floor(Math.random() * (words.length - 1));
+      const idx = rng.int(0, words.length - 1);
       [words[idx], words[idx + 1]] = [words[idx + 1], words[idx]];
     } else {
       // Duplicate a word (emphasis)
-      const idx = Math.floor(Math.random() * words.length);
+      const idx = rng.int(0, words.length);
       words.splice(idx, 0, words[idx]);
     }
 
@@ -148,9 +149,9 @@ export class MutationEngine {
     if (typeof gene.value !== 'object') return null;
 
     const keys = Object.keys(gene.value);
-    const key = keys[Math.floor(Math.random() * keys.length)];
+    const key = rng.pick(keys);
     const oldValue = gene.value[key];
-    const delta = (Math.random() * 2 - 1) * this.maxMagnitude;
+    const delta = (rng.random() * 2 - 1) * this.maxMagnitude;
     gene.value[key] = Math.max(0, Math.min(1, oldValue + delta));
 
     return { gene: gene.name, type: 'routing_drift', key, oldValue, newValue: gene.value[key] };
@@ -161,9 +162,9 @@ export class MutationEngine {
     if (typeof gene.value !== 'object') return null;
 
     const keys = Object.keys(gene.value);
-    const key = keys[Math.floor(Math.random() * keys.length)];
+    const key = rng.pick(keys);
     const oldValue = gene.value[key];
-    const delta = (Math.random() * 2 - 1) * this.maxMagnitude;
+    const delta = (rng.random() * 2 - 1) * this.maxMagnitude;
     gene.value[key] = Math.max(0, Math.min(1, oldValue + delta));
 
     return { gene: gene.name, type: 'personality_drift', key, oldValue, newValue: gene.value[key] };
@@ -175,7 +176,7 @@ export class MutationEngine {
     if (gene.value && typeof gene.value.rank === 'number') {
       const oldRank = gene.value.rank;
       const ranks = [4, 8, 16, 32, 64];
-      gene.value.rank = ranks[Math.floor(Math.random() * ranks.length)];
+      gene.value.rank = rng.pick(ranks);
       return { gene: gene.name, type: 'adapter_rank_change', oldRank, newRank: gene.value.rank };
     }
     return null;
