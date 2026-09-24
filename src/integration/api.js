@@ -1,15 +1,44 @@
 // iaADN - REST API: external interface to communicate with the hive mind
 // Provides chat, status, and population endpoints
+// Private by default: local-only listener, bearer token on /api/*, per-IP
+// rate limit, body size limit, no wildcard CORS. See docs/PLAN_EVOLUCION.md §4.
 
 import { createServer } from 'http';
 import { readFileSync, existsSync } from 'fs';
-import { resolve, dirname, extname } from 'path';
+import { resolve, dirname } from 'path';
 import { fileURLToPath } from 'url';
+import { verifyToken, RateLimiter } from './auth.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
+// Endpoints reachable without a token (still rate limited)
+const PUBLIC_API_PATHS = new Set(['/api/health']);
+
+class HttpError extends Error {
+  constructor(status, message) {
+    super(message);
+    this.status = status;
+  }
+}
+
 export class API {
-  constructor({ hiveMind, population, inferenceEngine, lineage, guardian, killSwitch, nodeId, port = 9091 }) {
+  constructor({
+    hiveMind,
+    population,
+    inferenceEngine,
+    lineage,
+    guardian,
+    killSwitch,
+    nodeId,
+    port = 9091,
+    host = '127.0.0.1',
+    token = null,
+    allowedOrigins = [],
+    rateLimit = { windowMs: 60 * 1000, max: 30 },
+    maxBodyBytes = 16 * 1024,
+    maxMessageChars = 4000,
+    trustProxy = false,
+  }) {
     this.hiveMind = hiveMind;
     this.population = population;
     this.inferenceEngine = inferenceEngine;
@@ -18,36 +47,61 @@ export class API {
     this.killSwitch = killSwitch;
     this.nodeId = nodeId;
     this.port = port;
+    this.host = host;
+    this.token = token;
+    this.allowedOrigins = new Set(allowedOrigins);
+    this.rateLimiter = new RateLimiter(rateLimit);
+    this.maxBodyBytes = maxBodyBytes;
+    this.maxMessageChars = maxMessageChars;
+    this.trustProxy = trustProxy;
     this.server = null;
   }
 
+  // Resolves with the port actually bound (useful with port 0 in tests)
   start() {
+    if (!this.token) {
+      throw new Error('API token is required — refusing to start an unauthenticated API');
+    }
     this.server = createServer((req, res) => this._handleRequest(req, res));
-    this.server.listen(this.port, () => {
-      console.log(`[API] Server running at http://localhost:${this.port}`);
-      console.log(`[API] Chat UI: http://localhost:${this.port}/`);
+    return new Promise((resolveStart, rejectStart) => {
+      this.server.once('error', rejectStart);
+      this.server.listen(this.port, this.host, () => {
+        this.port = this.server.address().port;
+        console.log(`[API] Listening on http://${this.host}:${this.port}`);
+        resolveStart(this.port);
+      });
     });
   }
 
   async _handleRequest(req, res) {
-    // CORS headers
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+    this._setBaseHeaders(req, res);
 
     if (req.method === 'OPTIONS') {
-      res.writeHead(200);
+      res.writeHead(204);
       res.end();
       return;
     }
 
-    const url = new URL(req.url, `http://localhost:${this.port}`);
+    const url = new URL(req.url, 'http://localhost');
     const path = url.pathname;
 
     try {
+      if (path.startsWith('/api/')) {
+        const limit = this.rateLimiter.check(this._clientIp(req));
+        if (!limit.allowed) {
+          res.setHeader('Retry-After', String(limit.retryAfterSec));
+          return this._json(res, { error: 'Too many requests' }, 429);
+        }
+
+        if (!PUBLIC_API_PATHS.has(path) && !verifyToken(req.headers.authorization, this.token)) {
+          res.setHeader('WWW-Authenticate', 'Bearer');
+          return this._json(res, { error: 'Unauthorized' }, 401);
+        }
+      }
+
       // --- API Routes ---
       if (path === '/api/chat' && req.method === 'POST') {
-        return this._handleChat(req, res);
+        return await this._handleChat(req, res);
       }
       if (path === '/api/status') {
         return this._handleStatus(res);
@@ -59,29 +113,69 @@ export class API {
         return this._handleLineage(res);
       }
       if (path === '/api/health') {
-        return this._json(res, { healthy: !this.killSwitch.isActive(), nodeId: this.nodeId });
+        return this._json(res, { healthy: !this.killSwitch.isActive() });
       }
 
-      // --- Static files (Chat UI) ---
+      // --- Static files (Chat UI) — no secrets in it, served without a token ---
       if (path === '/' || path === '/index.html') {
-        return this._serveFile(res, resolve(__dirname, '../../docs/chat.html'), 'text/html');
+        return this._serveFile(res, resolve(__dirname, '../../docs/chat.html'), 'text/html; charset=utf-8');
       }
 
-      // 404
-      res.writeHead(404);
-      res.end(JSON.stringify({ error: 'Not found' }));
+      return this._json(res, { error: 'Not found' }, 404);
     } catch (err) {
-      res.writeHead(500);
-      res.end(JSON.stringify({ error: err.message }));
+      if (err instanceof HttpError) {
+        if (err.status === 413) res.setHeader('Connection', 'close');
+        return this._json(res, { error: err.message }, err.status);
+      }
+      console.error(`[API] ${req.method} ${path} failed: ${err.stack || err.message}`);
+      return this._json(res, { error: 'Internal error' }, 500);
     }
+  }
+
+  _setBaseHeaders(req, res) {
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('X-Frame-Options', 'DENY');
+    res.setHeader('Referrer-Policy', 'no-referrer');
+
+    // CORS only for explicitly allowed origins — never a wildcard
+    const origin = req.headers.origin;
+    if (origin && this.allowedOrigins.has(origin)) {
+      res.setHeader('Access-Control-Allow-Origin', origin);
+      res.setHeader('Vary', 'Origin');
+      res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+      res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+    }
+  }
+
+  // Behind a reverse proxy every request comes from 127.0.0.1, so the proxy's
+  // X-Forwarded-For is used — but only when trustProxy is set, since clients
+  // can forge that header when talking to the API directly.
+  _clientIp(req) {
+    if (this.trustProxy) {
+      const forwarded = req.headers['x-forwarded-for'];
+      if (typeof forwarded === 'string' && forwarded.length > 0) {
+        return forwarded.split(',')[0].trim();
+      }
+    }
+    return req.socket.remoteAddress || 'unknown';
   }
 
   async _handleChat(req, res) {
     const body = await this._readBody(req);
-    const { message } = JSON.parse(body);
 
-    if (!message) {
+    let parsed;
+    try {
+      parsed = JSON.parse(body);
+    } catch {
+      throw new HttpError(400, 'Invalid JSON body');
+    }
+
+    const message = parsed?.message;
+    if (typeof message !== 'string' || message.trim().length === 0) {
       return this._json(res, { error: 'Missing "message" field' }, 400);
+    }
+    if (message.length > this.maxMessageChars) {
+      return this._json(res, { error: `Message too long (max ${this.maxMessageChars} characters)` }, 400);
     }
 
     // Direct inference — fast path, single inference call
@@ -91,6 +185,7 @@ export class API {
       const systemPrompt = best?.genome?.getSystemPrompt() || '';
       const config = best?.genome?.getInferenceConfig() || {};
 
+      let timer;
       try {
         // Use dedicated chat context — never blocked by daemon fitness evaluation
         const result = await Promise.race([
@@ -102,9 +197,9 @@ export class API {
               maxTokens: 256,
             }
           ),
-          new Promise((_, reject) =>
-            setTimeout(() => reject(new Error('Inference timeout (120s)')), 120000)
-          ),
+          new Promise((_, reject) => {
+            timer = setTimeout(() => reject(new Error('Inference timeout (120s)')), 120000);
+          }),
         ]);
 
         return this._json(res, {
@@ -117,10 +212,13 @@ export class API {
           },
         });
       } catch (err) {
+        console.error(`[API] Chat inference failed: ${err.message}`);
         return this._json(res, {
-          response: `[iaADN] Error: ${err.message}`,
+          response: '[iaADN] Error: inference failed',
           metadata: { mode: 'error' },
         });
+      } finally {
+        clearTimeout(timer);
       }
     }
 
@@ -179,27 +277,49 @@ export class API {
 
   _serveFile(res, filePath, contentType) {
     if (!existsSync(filePath)) {
-      res.writeHead(404);
-      res.end('File not found');
-      return;
+      return this._json(res, { error: 'Not found' }, 404);
     }
     const content = readFileSync(filePath, 'utf-8');
     res.writeHead(200, { 'Content-Type': contentType });
     res.end(content);
   }
 
+  // Read the request body, rejecting with 413 once it passes maxBodyBytes.
+  // Excess data is drained, not buffered, so a huge upload can't fill RAM.
   _readBody(req) {
-    return new Promise((resolve, reject) => {
-      let body = '';
-      req.on('data', chunk => { body += chunk; });
-      req.on('end', () => resolve(body));
-      req.on('error', reject);
+    const declared = Number(req.headers['content-length']);
+    if (Number.isFinite(declared) && declared > this.maxBodyBytes) {
+      req.resume();
+      return Promise.reject(new HttpError(413, 'Request body too large'));
+    }
+
+    return new Promise((resolveBody, rejectBody) => {
+      const chunks = [];
+      let size = 0;
+      let tooLarge = false;
+
+      req.on('data', chunk => {
+        if (tooLarge) return;
+        size += chunk.length;
+        if (size > this.maxBodyBytes) {
+          tooLarge = true;
+          chunks.length = 0;
+          return;
+        }
+        chunks.push(chunk);
+      });
+      req.on('end', () => {
+        if (tooLarge) rejectBody(new HttpError(413, 'Request body too large'));
+        else resolveBody(Buffer.concat(chunks).toString('utf-8'));
+      });
+      req.on('error', rejectBody);
     });
   }
 
   stop() {
     if (this.server) {
       this.server.close();
+      this.server.closeAllConnections?.();
       console.log('[API] Server stopped');
     }
   }

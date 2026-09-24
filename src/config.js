@@ -3,7 +3,7 @@
 
 import { resolve, dirname } from 'path';
 import { fileURLToPath } from 'url';
-import { readFileSync, existsSync, writeFileSync } from 'fs';
+import { readFileSync, existsSync, writeFileSync, chmodSync } from 'fs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = resolve(__dirname, '..');
@@ -84,6 +84,13 @@ const DEFAULT_CONFIG = {
   network: {
     port: 9090,
     apiPort: 9091,
+    apiHost: '127.0.0.1', // local only by default — exposing the API is an explicit choice
+    apiToken: null, // auto-generated on first boot; IAADN_API_TOKEN env var overrides it
+    allowedOrigins: [], // cross-origin callers allowed to use the API (built-in chat is same-origin)
+    rateLimit: { windowMs: 60 * 1000, max: 30 }, // per-IP requests per window on /api/*
+    maxBodyBytes: 16 * 1024, // largest accepted request body
+    maxMessageChars: 4000, // longest accepted chat message
+    trustProxy: false, // set true only behind a reverse proxy (uses X-Forwarded-For for rate limiting)
     maxPeers: 50,
     maxBandwidthPerHour: 100 * 1024 * 1024, // 100MB
     syncInterval: 5 * 60 * 1000, // 5 minutes
@@ -114,7 +121,7 @@ const DEFAULT_CONFIG = {
 };
 
 let _config = null;
-const CONFIG_FILE = resolve(PROJECT_ROOT, 'data', 'config.json');
+export const CONFIG_FILE = resolve(PROJECT_ROOT, 'data', 'config.json');
 
 export function loadConfig(overrides = {}) {
   let saved = {};
@@ -130,7 +137,9 @@ export function loadConfig(overrides = {}) {
 }
 
 export function saveConfig(config) {
-  writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2), 'utf-8');
+  // Owner-only: the file holds the API token
+  writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2), { encoding: 'utf-8', mode: 0o600 });
+  chmodSync(CONFIG_FILE, 0o600); // mode above only applies when the file is created
 }
 
 export function getConfig() {

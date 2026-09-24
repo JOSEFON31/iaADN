@@ -3,7 +3,7 @@
 // Entry point: boots the system, initializes all components
 // After boot, the daemon runs 24/7 autonomously — no human needed
 
-import { loadConfig, getConfig, saveConfig } from './config.js';
+import { loadConfig, getConfig, saveConfig, CONFIG_FILE } from './config.js';
 import { Genome } from './genome/genome.js';
 import { GenomeCodec } from './genome/codec.js';
 import { Lineage } from './genome/lineage.js';
@@ -57,6 +57,10 @@ class IaADN {
       saveConfig(this.config);
     }
     console.log(`[Boot] Node ID: ${this.nodeId}`);
+
+    // 1a. API token — generated once and kept in data/config.json (owner-only
+    // file). Never logged; read it deliberately with `--show-token`.
+    this.apiToken = resolveApiToken(this.config);
 
     // 1b. Seed the shared RNG — every mutation/crossover/selection decision
     // from here on is reproducible from this one value.
@@ -145,18 +149,29 @@ class IaADN {
     });
     console.log('[Boot] Hive mind initialized');
 
-    // 10. Start API server
-    this.api = new API({
-      hiveMind: this.hiveMind,
-      population: this.populationManager,
-      inferenceEngine: this.inferenceEngine,
-      lineage: this.lineage,
-      guardian: this.guardian,
-      killSwitch: this.killSwitch,
-      nodeId: this.nodeId,
-      port: this.config.network.apiPort,
-    });
-    this.api.start();
+    // 10. Start API server (not needed for a fast simulation run)
+    if (!simulate) {
+      const net = this.config.network;
+      this.api = new API({
+        hiveMind: this.hiveMind,
+        population: this.populationManager,
+        inferenceEngine: this.inferenceEngine,
+        lineage: this.lineage,
+        guardian: this.guardian,
+        killSwitch: this.killSwitch,
+        nodeId: this.nodeId,
+        port: net.apiPort,
+        host: net.apiHost,
+        token: this.apiToken,
+        allowedOrigins: net.allowedOrigins,
+        rateLimit: net.rateLimit,
+        maxBodyBytes: net.maxBodyBytes,
+        maxMessageChars: net.maxMessageChars,
+        trustProxy: net.trustProxy,
+      });
+      await this.api.start();
+      console.log(`[Boot] API token: stored in ${CONFIG_FILE} (print it with --show-token)`);
+    }
 
     // 11. Create genesis population, unless one was restored from persistence
     if (restored.length === 0) {
@@ -344,8 +359,26 @@ class IaADN {
   }
 }
 
+// API token precedence: IAADN_API_TOKEN env var, then data/config.json.
+// If neither exists, generate one and persist it (never the env value).
+function resolveApiToken(config) {
+  if (process.env.IAADN_API_TOKEN) return process.env.IAADN_API_TOKEN;
+  if (!config.network.apiToken) {
+    config.network.apiToken = randomBytes(32).toString('hex');
+    saveConfig(config);
+  }
+  return config.network.apiToken;
+}
+
 // --- Main ---
 const args = process.argv.slice(2);
+
+if (args.includes('--show-token')) {
+  // Deliberate, owner-initiated read of the API token — prints it and exits
+  // without booting the rest of the system.
+  console.log(resolveApiToken(loadConfig()));
+  process.exit(0);
+}
 
 function parseFlag(name) {
   const arg = args.find(a => a === `--${name}` || a.startsWith(`--${name}=`));

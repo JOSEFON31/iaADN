@@ -1,0 +1,10 @@
+# iaADN — Caddy reverse proxy with automatic HTTPS
+# Copy to /etc/caddy/Caddyfile, replace the domain, then: sudo systemctl reload caddy
+# Caddy gets a TLS certificate automatically and forwards to the API, which
+# only listens on 127.0.0.1. Set "network": { "trustProxy": true } in
+# data/config.json so iaADN rate-limits by the real client IP.
+
+iaadn.example.com {
+	encode gzip
+	reverse_proxy 127.0.0.1:9091
+}

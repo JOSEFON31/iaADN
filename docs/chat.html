@@ -266,6 +266,22 @@
     .input-area button:hover { background: var(--accent2); }
     .input-area button:disabled { opacity: 0.5; cursor: not-allowed; }
 
+    /* API token form — shown until a valid token is entered */
+    .input-area input {
+      flex: 1;
+      min-width: 0;
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 10px 14px;
+      color: var(--text);
+      font-family: inherit;
+      font-size: 0.92em;
+      outline: none;
+    }
+    .input-area input:focus { border-color: var(--accent); }
+    [hidden] { display: none !important; }
+
     /* Scrollbar */
     ::-webkit-scrollbar { width: 6px; }
     ::-webkit-scrollbar-track { background: transparent; }
@@ -310,7 +326,11 @@
     <div class="typing" id="typing">
       <span></span><span></span><span></span>
     </div>
-    <div class="input-area">
+    <form class="input-area" id="tokenForm" hidden>
+      <input id="tokenInput" type="password" autocomplete="off" placeholder="API token (node src/index.js --show-token)" aria-label="API token">
+      <button type="submit">Connect</button>
+    </form>
+    <div class="input-area" id="chatForm">
       <textarea id="input" rows="1" placeholder="Send a message to the hive mind..." autofocus></textarea>
       <button id="sendBtn" onclick="sendMessage()">Send</button>
     </div>
@@ -323,6 +343,71 @@ const messagesEl = document.getElementById('messages');
 const inputEl = document.getElementById('input');
 const sendBtn = document.getElementById('sendBtn');
 const typingEl = document.getElementById('typing');
+const tokenForm = document.getElementById('tokenForm');
+const tokenInput = document.getElementById('tokenInput');
+const chatForm = document.getElementById('chatForm');
+
+// --- API token (kept in this browser only; storage may be unavailable) ---
+const TOKEN_KEY = 'iaadn.apiToken';
+let apiToken = null;
+try { apiToken = localStorage.getItem(TOKEN_KEY); } catch {}
+
+function setToken(value) {
+  apiToken = value;
+  try {
+    if (value) localStorage.setItem(TOKEN_KEY, value);
+    else localStorage.removeItem(TOKEN_KEY);
+  } catch {}
+}
+
+function showTokenForm(reason) {
+  // Several polls can 401 at once — only announce it the first time
+  if (!tokenForm.hidden) reason = null;
+  setToken(null);
+  chatForm.hidden = true;
+  tokenForm.hidden = false;
+  document.getElementById('statusDot').className = 'dot orange';
+  document.getElementById('statusText').textContent = 'Token required';
+  if (reason) addMessage(reason, 'system');
+  tokenInput.focus();
+}
+
+function showChat() {
+  tokenForm.hidden = true;
+  chatForm.hidden = false;
+  inputEl.focus();
+}
+
+tokenForm.addEventListener('submit', (e) => {
+  e.preventDefault();
+  const value = tokenInput.value.trim();
+  if (!value) return;
+  tokenInput.value = '';
+  setToken(value);
+  showChat();
+  refreshStatus();
+  refreshLineage();
+});
+
+class UnauthorizedError extends Error {}
+
+// fetch() with the bearer token; a 401 drops the token and asks again
+async function apiFetch(path, options = {}) {
+  if (!apiToken) throw new UnauthorizedError('No token');
+  const res = await fetch(`${API_BASE}${path}`, {
+    ...options,
+    headers: { ...(options.headers || {}), Authorization: `Bearer ${apiToken}` },
+  });
+  if (res.status === 401) {
+    showTokenForm('Invalid or missing API token. Enter it again.');
+    throw new UnauthorizedError('Unauthorized');
+  }
+  if (res.status === 429) {
+    const wait = res.headers.get('Retry-After') || '60';
+    throw new Error(`Too many requests — try again in ${wait}s`);
+  }
+  return res;
+}
 
 // Auto-resize textarea
 inputEl.addEventListener('input', () => {
@@ -364,7 +449,7 @@ async function sendMessage() {
   typingEl.classList.add('active');
 
   try {
-    const res = await fetch(`${API_BASE}/api/chat`, {
+    const res = await apiFetch('/api/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ message: text }),
@@ -381,7 +466,9 @@ async function sendMessage() {
       addMessage(data.response, 'ai', meta);
     }
   } catch (err) {
-    addMessage(`Connection error: ${err.message}`, 'system');
+    if (!(err instanceof UnauthorizedError)) {
+      addMessage(`Connection error: ${err.message}`, 'system');
+    }
   }
 
   typingEl.classList.remove('active');
@@ -391,8 +478,9 @@ async function sendMessage() {
 
 // Poll status
 async function refreshStatus() {
+  if (!apiToken) return;
   try {
-    const res = await fetch(`${API_BASE}/api/status`);
+    const res = await apiFetch('/api/status');
     const data = await res.json();
 
     document.getElementById('statusDot').className = 'dot green';
@@ -417,15 +505,18 @@ async function refreshStatus() {
     } else {
       listEl.innerHTML = '<div class="instance-card" style="color:var(--text-dim)">No instances</div>';
     }
-  } catch {
-    document.getElementById('statusDot').className = 'dot red';
-    document.getElementById('statusText').textContent = 'Disconnected';
+  } catch (err) {
+    if (err instanceof UnauthorizedError) return;
+    const limited = err.message.startsWith('Too many requests');
+    document.getElementById('statusDot').className = limited ? 'dot orange' : 'dot red';
+    document.getElementById('statusText').textContent = limited ? 'Rate limited' : 'Disconnected';
   }
 }
 
 async function refreshLineage() {
+  if (!apiToken) return;
   try {
-    const res = await fetch(`${API_BASE}/api/lineage`);
+    const res = await apiFetch('/api/lineage');
     const data = await res.json();
     const s = data.stats || {};
     document.getElementById('lineageStats').innerHTML = `
@@ -440,6 +531,7 @@ async function refreshLineage() {
 }
 
 // Initial load + polling
+if (apiToken) showChat(); else showTokenForm();
 refreshStatus();
 refreshLineage();
 setInterval(refreshStatus, 5000);

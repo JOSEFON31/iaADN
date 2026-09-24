@@ -247,7 +247,7 @@ Problemas concretos del código actual y solución:
 | El guardian busca texto (`code.includes('eval')`); se evade con `e['v'+'al']` | `src/safety/guardian.js` | Análisis AST con `acorn` (ya es dependencia) + lista blanca de lo permitido en vez de lista negra |
 | Regla de seguridad = substring en el prompt | `src/safety/rules.js` | Prompt de seguridad inyectado por el orquestador en tiempo de ejecución, fuera del genoma; + tareas de seguridad en el fitness |
 | Kill switch dentro del mismo proceso | `src/safety/kill-switch.js` | Kill switch externo: archivo/señal vigilada por un proceso supervisor independiente + comando remoto firmado |
-| API sin autenticación abierta a internet | `src/integration/api.js`, `deploy/firewall.sh` | Tokens, HTTPS, rate-limit, cerrar el puerto salvo a través de proxy |
+| API sin autenticación abierta a internet | `src/integration/api.js`, `deploy/firewall.sh` | ✅ Hecho: escucha solo en `127.0.0.1`, token Bearer obligatorio en `/api/*` (`--show-token` para verlo), rate-limit por IP, límite de tamaño de body, sin CORS `*`, errores internos no se filtran; acceso por túnel SSH o Caddy con HTTPS (`deploy/Caddyfile.example`) |
 | Los agentes podrían influir en su evaluación | — | Evaluador en proceso separado, benchmarks fuera del alcance de los agentes, test oculto |
 
 Límites que **ningún** agente puede cambiar (fuera del genoma, en código protegido y verificado por hash al arrancar):
