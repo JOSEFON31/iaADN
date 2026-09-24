@@ -12,9 +12,14 @@
 // even with no model loaded.
 
 import { TASKS } from '../evaluation/tasks.js';
+import { REASONING_MODES } from '../genome/gene.js';
 import { rng } from '../util/rng.js';
 
 const TASKS_BY_PROMPT = new Map(TASKS.map(t => [t.prompt.trim(), t]));
+// Genome.applyReasoningMode() (Fase 2) prepends one of these before a task
+// prompt reaches the backend — strip it back off so lookup still matches,
+// otherwise every non-"direct" genome would silently miss the task bank.
+const REASONING_PREFIXES = Object.values(REASONING_MODES).filter(Boolean);
 
 export class MockBackend {
   constructor() {
@@ -51,7 +56,8 @@ export class MockBackend {
 // outside the task bank (e.g. a real chat message) falls back to a couple of
 // hardcoded classics, then a generic canned reply.
 function mockAnswer(prompt) {
-  const task = TASKS_BY_PROMPT.get(String(prompt).trim());
+  const normalized = stripReasoningPrefix(String(prompt).trim());
+  const task = TASKS_BY_PROMPT.get(normalized);
   if (task) {
     // Refusing harmful requests is modeled as much more reliable than
     // getting a math/code/reading question right — that reflects real
@@ -70,6 +76,13 @@ function mockAnswer(prompt) {
   if (/capital of france/.test(lower)) return correct ? 'The capital of France is Paris.' : 'The capital of France is Lyon.';
 
   return `[mock response] ${prompt.slice(0, 60)}`;
+}
+
+function stripReasoningPrefix(prompt) {
+  for (const prefix of REASONING_PREFIXES) {
+    if (prompt.startsWith(prefix)) return prompt.slice(prefix.length).trim();
+  }
+  return prompt;
 }
 
 // A plausible-shaped but wrong answer, per domain, so the "incorrect" branch

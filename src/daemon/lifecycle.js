@@ -38,10 +38,10 @@ export class Lifecycle {
 
     // Initialize all autonomous modules
     this.autoEvolve = new AutoEvolve({ population, inferenceEngine, auditLog });
-    this.autoProgram = new AutoProgram({ population, inferenceEngine, guardian, auditLog });
+    this.autoProgram = new AutoProgram({ population, lineage, inferenceEngine, guardian, auditLog });
     this.autoReplicate = new AutoReplicate({ population, guardian, lineage, iotaiBridge, auditLog });
     this.autoPrune = new AutoPrune({ population, guardian, auditLog });
-    this.autoLearn = new AutoLearn({ population, inferenceEngine, auditLog });
+    this.autoLearn = new AutoLearn({ population, lineage, guardian, inferenceEngine, auditLog });
     this.heartbeat = new Heartbeat({ guardian, population, killSwitch });
     this.recovery = new Recovery({ population, guardian, lineage, auditLog, nodeId });
 

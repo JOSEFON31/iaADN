@@ -7,6 +7,7 @@ export const CHROMOSOME_TYPES = {
   INFERENCE: 'inference',       // model, config, adapters
   PERSONALITY: 'personality',   // prompts, personality traits
   SPECIALIZATION: 'specialization', // routing, code modules
+  STRATEGY: 'strategy',         // how the instance reasons about a task
   META: 'meta',                 // mutation rate, crossover preference (meta-evolution)
 };
 
@@ -81,6 +82,10 @@ export class Chromosome {
       name: 'SpecializationChromosome',
       type: CHROMOSOME_TYPES.SPECIALIZATION,
     });
+    const strategy = new Chromosome({
+      name: 'StrategyChromosome',
+      type: CHROMOSOME_TYPES.STRATEGY,
+    });
     const meta = new Chromosome({
       name: 'MetaChromosome',
       type: CHROMOSOME_TYPES.META,
@@ -101,6 +106,9 @@ export class Chromosome {
         case GENE_TYPES.ROUTING:
         case GENE_TYPES.CODE:
           specialization.addGene(gene);
+          break;
+        case GENE_TYPES.STRATEGY:
+          strategy.addGene(gene);
           break;
       }
     }
@@ -123,6 +131,6 @@ export class Chromosome {
       value: 0.3, // 0=exploit, 1=explore
     }));
 
-    return { inference, personality, specialization, meta };
+    return { inference, personality, specialization, strategy, meta };
   }
 }

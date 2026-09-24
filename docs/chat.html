@@ -317,6 +317,12 @@
     <div id="lineageStats" class="instance-card" style="color: var(--text-dim); font-size: 0.8em;">
       Loading...
     </div>
+    <h3 style="margin-top:16px">Fitness over time</h3>
+    <svg id="fitnessChart" viewBox="0 0 200 60" preserveAspectRatio="none"
+      style="width:100%;height:60px;background:var(--surface2);border:1px solid var(--border);border-radius:8px;"></svg>
+    <div style="font-size:0.72em;color:var(--text-dim);margin-top:4px;">
+      <span style="color:#888898;">— avg</span> &nbsp; <span style="color:#a29bfe;">— best</span>
+    </div>
   </aside>
 
   <div class="chat-area">
@@ -387,6 +393,7 @@ tokenForm.addEventListener('submit', (e) => {
   showChat();
   refreshStatus();
   refreshLineage();
+  refreshGenerations();
 });
 
 class UnauthorizedError extends Error {}
@@ -568,12 +575,53 @@ async function refreshLineage() {
   }
 }
 
+const SVG_NS = 'http://www.w3.org/2000/svg';
+
+async function refreshGenerations() {
+  if (!apiToken) return;
+  try {
+    const res = await apiFetch('/api/generations?limit=50');
+    const data = await res.json();
+    renderFitnessChart(data.generations || []);
+  } catch {
+    // leave whatever was last drawn — a blank chart isn't worth a message
+  }
+}
+
+// Draws avg/best fitness per generation as two polylines. Built with SVG DOM
+// nodes (not innerHTML) so server-provided numbers never touch markup.
+function renderFitnessChart(generations) {
+  const svg = document.getElementById('fitnessChart');
+  svg.replaceChildren();
+  if (generations.length < 2) return;
+
+  const width = 200, height = 60, pad = 4;
+  const stepX = (width - pad * 2) / (generations.length - 1);
+  const toY = (v) => height - pad - (Math.max(0, Math.min(1, Number(v) || 0)) * (height - pad * 2));
+
+  const line = (key, color) => {
+    const points = generations
+      .map((g, i) => `${(pad + i * stepX).toFixed(1)},${toY(g[key]).toFixed(1)}`)
+      .join(' ');
+    const el = document.createElementNS(SVG_NS, 'polyline');
+    el.setAttribute('points', points);
+    el.setAttribute('fill', 'none');
+    el.setAttribute('stroke', color);
+    el.setAttribute('stroke-width', '1.5');
+    return el;
+  };
+
+  svg.append(line('avgFitness', '#888898'), line('bestFitness', '#a29bfe'));
+}
+
 // Initial load + polling
 if (apiToken) showChat(); else showTokenForm();
 refreshStatus();
 refreshLineage();
+refreshGenerations();
 setInterval(refreshStatus, 5000);
 setInterval(refreshLineage, 15000);
+setInterval(refreshGenerations, 15000);
 </script>
 
 </body>

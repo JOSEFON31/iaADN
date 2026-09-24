@@ -125,6 +125,26 @@ describe('API', () => {
     assert.match(page.headers['content-type'], /text\/html/);
   });
 
+  it('returns an empty generations list when no persistence store is configured', async () => {
+    const res = await call(api, { path: '/api/generations', headers: auth });
+    assert.equal(res.status, 200);
+    assert.deepEqual(res.json, { generations: [] });
+  });
+
+  it('reads generations from the persistence store, respecting the limit param', async () => {
+    const rows = [{ generation: 1, avgFitness: 0.4 }, { generation: 2, avgFitness: 0.5 }];
+    const withPersistence = await startApi({
+      persistence: { listGenerations: (limit) => rows.slice(0, limit) },
+    });
+    try {
+      const res = await call(withPersistence, { path: '/api/generations?limit=1', headers: auth });
+      assert.equal(res.status, 200);
+      assert.deepEqual(res.json.generations, [rows[0]]);
+    } finally {
+      withPersistence.stop();
+    }
+  });
+
   it('answers chat with a valid token', async () => {
     const res = await call(api, {
       method: 'POST', path: '/api/chat', headers: { ...auth, 'Content-Type': 'application/json' },

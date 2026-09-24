@@ -86,7 +86,7 @@ export class FitnessEvaluator {
       let passed = false;
       try {
         const result = await engine.complete(
-          [{ role: 'user', content: task.prompt }],
+          [{ role: 'user', content: genome.applyReasoningMode(task.prompt) }],
           {
             systemPrompt: genome.getSystemPrompt(),
             maxTokens: 200,

@@ -184,24 +184,52 @@ tareas reales en vez de 2 fijas). **Pendiente:** medir la correlación fitness-v
 de la meta original — hace falta acumular varias generaciones reales (no solo simuladas) para calcularla con
 sentido.
 
-### Fase 2 — Evolución real (2–3 semanas)
+### Fase 2 — Evolución real (2–3 semanas) — 🟡 primera tanda hecha
 
-- Genoma ampliado (tabla §2) en `src/genome/`.
-- Ciclo generacional estricto en `Population.runGeneration`:
-  1. evaluar a todos con el mismo lote de tareas;
-  2. **élite** (top 10–20 %) sobrevive intacta;
-  3. selección por torneo para padres;
-  4. cruce + mutación → hijos;
-  5. evaluar hijos; **mueren** los que queden por debajo del umbral o fuera de la capacidad de carga.
-- **Especies / nichos** (`src/evolution/species.js`) + **MAP-Elites** por dominio: se conserva al mejor agente de cada
-  especialidad, así no desaparece un buen especialista en código solo porque otro generalista puntúa algo más.
-- Mutación dirigida por LLM: un agente "mutador" propone variantes del prompt/estrategia (tipo *PromptBreeder*/*EvoPrompt*).
-- `AutoProgram` y `AutoLearn` pasan a producir **hijos**, nunca a modificar al padre.
-- Dashboard de linaje: árbol genealógico, curva de fitness por generación.
-- Implementar `HiveMind.broadcast()` (§2.1): preguntar a todos los agentes vivos y comparar sus respuestas es también
-  una herramienta de depuración de la propia evolución (ver si la diversidad de respuestas se reduce con el tiempo).
+- **Especies/nichos, de verdad conectadas.** `SpeciesManager` (`src/evolution/species.js`) existía pero no se usaba
+  en ningún sitio — `Population.getStats().speciesCount` incluso se leía ya en `src/genome/codec.js` sin que nada
+  lo rellenara nunca. Ahora `Population.runGeneration` clasifica a la población en especies cada generación y
+  `SelectionEngine.survivalSelection` protege al mejor de cada especie al recortar por capacidad, además de la
+  élite global — un especialista en código ya no desaparece solo porque los generalistas puntúen algo más.
+  No es MAP-Elites completo (una rejilla por combinación de rasgos); es protección por especie, más simple pero
+  con el mismo efecto práctico de no perder nichos.
+- **Cromosoma de estrategia con efecto real.** Gen nuevo `reasoningMode` (`direct` / `step_by_step` /
+  `self_critique`, mutable) que antepone una instrucción real al prompt de cada tarea
+  (`Genome.applyReasoningMode`, usado en `FitnessEvaluator.runTasks` y en la sonda de cooperación). No es
+  decorativo: cambia literalmente lo que se le manda al modelo.
+- **`AutoProgram` y `AutoLearn` ya no editan al agente vivo.** Antes, `AutoProgram` metía el gen de código
+  autogenerado directamente en `best.genome`, y `AutoLearn._generateImprovement` escribía los pesos de
+  especialización sugeridos por el LLM en el genoma en marcha, sin comprobar nada. Ahora ambos: clonan al mejor,
+  aplican el cambio al **clon**, lo evalúan con el `FitnessEvaluator` real, y solo lo registran como una instancia
+  nueva si no empeora; si empeora, se descarta y el original queda intacto (verificado con tests que comprueban
+  que el genoma del padre no cambia en ningún caso).
+- **`GET /api/generations`** expone el historial de fitness por generación que `PersistenceStore` ya guardaba
+  desde la Fase 0 (`listGenerations`, sin almacenamiento nuevo), y `docs/chat.html` dibuja una curva simple
+  (SVG, sin `innerHTML`) de fitness medio/mejor por generación. No es el árbol genealógico completo que pedía el
+  plan — es la parte práctica y de bajo riesgo (ver "no incluido" abajo).
+- **Medición honesta del criterio de salida (`--eval-test`):** se añadió una comparación real genoma-génesis vs.
+  mejor-agente sobre el test oculto de la Fase 1, que antes nadie calculaba. Resultado con el backend simulado:
+  el delta **no mejora de forma consistente** (+4.5, +13.6, −22.7, +0.0, −18.2 puntos según la semilla, sobre 50
+  generaciones cada una). La causa, verificada, no es un fallo del código: bajo el backend simulado, si reconoce
+  una tarea la acierta con una probabilidad fija (70 % general, 95 % en seguridad) **igual para cualquier
+  genoma** — el contenido del prompt no cambia si acierta o no. La selección solo tiene palanca real sobre
+  especialización (config del genoma) y novedad (distancia genética); accuracy/efficiency/cooperation son
+  esencialmente ruido bajo el backend simulado. Este criterio de salida solo se podrá cumplir de verdad con un
+  modelo real cargado, donde el contenido del prompt sí importe.
 
-**Salida:** tras 50 generaciones el mejor agente supera al genoma génesis en ≥15 puntos en el test oculto.
+**No incluido en esta tanda** (se dice explícitamente, igual que en la Fase 0/1):
+- Cromosomas de conocimiento (ejemplos few-shot) y herramientas (calculadora/búsqueda) — genuinos pero separados.
+- Adaptador LoRA de verdad — necesita un pipeline de entrenamiento, eso es Fase 3.
+- Un agente "mutador" independiente al estilo PromptBreeder — se cubrió la intención (mutación dirigida por LLM,
+  evaluada antes de aplicarse) integrándola en el arreglo de `AutoLearn`, no como componente aparte.
+- Árbol genealógico visual completo — la curva de fitness por generación es la parte de bajo riesgo; un árbol es
+  un proyecto de UI en sí mismo.
+- `HiveMind.broadcast()` (§2.1) — sigue pendiente, no se tocó en esta tanda.
+
+**Salida (medida, no solo esperada):** con el backend simulado, tras 50 generaciones el mejor agente **no** supera
+de forma fiable al genoma génesis en el test oculto — el delta cambia de signo según la semilla. Esto es el
+resultado correcto y esperable dado que el simulado no liga la calidad del genoma a si acierta una tarea; el
+criterio real de la Fase 2 queda pendiente de comprobar con un modelo cargado de verdad.
 
 ### Fase 3 — Autoaprendizaje (3–4 semanas)
 

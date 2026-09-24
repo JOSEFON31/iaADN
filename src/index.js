@@ -160,6 +160,7 @@ class IaADN {
         lineage: this.lineage,
         guardian: this.guardian,
         killSwitch: this.killSwitch,
+        persistence: this.persistenceStore,
         nodeId: this.nodeId,
         port: net.apiPort,
         host: net.apiHost,
@@ -282,10 +283,29 @@ class IaADN {
   // timers, normally against the mock inference backend — for validating the
   // evolutionary loop in seconds instead of hours. See docs/PLAN_EVOLUCION.md
   // section "0. Cimientos" — "Modo simulación rápida".
-  async runSimulation(generations) {
+  async runSimulation(generations, { evalTest = false } = {}) {
     console.log(`\n[Simulate] Running ${generations} generation(s) as fast as possible...`);
     const startedAt = Date.now();
     const history = [];
+
+    // --eval-test: score the starting (genesis) genomes against the
+    // held-out test split BEFORE evolving, so there's an honest before/after
+    // to check the Fase 2 exit criterion against (best agent should beat
+    // genesis by >=15 points on held-out test after 50 generations) — see
+    // docs/PLAN_EVOLUCION.md Fase 1/2. Nothing computed this before.
+    let genesisTestScore = null;
+    let testSet = [];
+    if (evalTest) {
+      testSet = this.populationManager.fitnessEvaluator.taskBank.getTestSet();
+      const genesisGenomes = this.populationManager.getLiving().map(i => i.genome);
+      const scores = [];
+      for (const genome of genesisGenomes) {
+        const result = await this.populationManager.fitnessEvaluator.runTasks(genome, this.inferenceEngine, testSet);
+        scores.push(result.score);
+      }
+      genesisTestScore = scores.reduce((s, v) => s + v, 0) / Math.max(1, scores.length);
+      console.log(`[EvalTest] Genesis avg score on held-out test (${testSet.length} tasks): ${(genesisTestScore * 100).toFixed(1)}%`);
+    }
 
     // The real daemon runs Recovery every 30s to top up a population that
     // dropped to 0-1 instances (src/daemon/lifecycle.js); a fast simulation
@@ -323,17 +343,36 @@ class IaADN {
       });
     }
 
+    let evalTestResult = null;
+    if (evalTest) {
+      const best = this.populationManager.getBest();
+      const result = best
+        ? await this.populationManager.fitnessEvaluator.runTasks(best.genome, this.inferenceEngine, testSet)
+        : null;
+      const bestTestScore = result ? result.score : 0;
+      const deltaPoints = (bestTestScore - genesisTestScore) * 100;
+      console.log(`[EvalTest] Best agent avg score on held-out test: ${(bestTestScore * 100).toFixed(1)}%`);
+      console.log(`[EvalTest] Delta vs genesis: ${deltaPoints >= 0 ? '+' : ''}${deltaPoints.toFixed(1)} points (target: >= 15)`);
+      evalTestResult = {
+        testTasks: testSet.length,
+        genesisScore: genesisTestScore,
+        bestScore: bestTestScore,
+        deltaPoints,
+        meetsTarget: deltaPoints >= 15,
+      };
+    }
+
     const elapsedMs = Date.now() - startedAt;
     const summaryPath = resolve(getConfig().paths.data, 'snapshots', `simulation-${Date.now()}.json`);
     mkdirSync(dirname(summaryPath), { recursive: true });
-    writeFileSync(summaryPath, JSON.stringify({ generations, elapsedMs, seed: getSeed(), history }, null, 2));
+    writeFileSync(summaryPath, JSON.stringify({ generations, elapsedMs, seed: getSeed(), history, evalTest: evalTestResult }, null, 2));
 
     const last = history[history.length - 1];
     console.log(`[Simulate] Done: ${generations} generation(s) in ${elapsedMs}ms.`);
     console.log(`[Simulate] Final population: ${this.populationManager.getLiving().length}, best fitness: ${last?.bestFitness ?? 'n/a'}`);
     console.log(`[Simulate] Summary saved to ${summaryPath}`);
 
-    return { elapsedMs, history };
+    return { elapsedMs, history, evalTest: evalTestResult };
   }
 
   // Graceful shutdown
@@ -411,6 +450,7 @@ function parseFlag(name) {
 const simulateFlag = parseFlag('simulate');
 const simulateGenerations = simulateFlag ? parseInt(simulateFlag === true ? '20' : simulateFlag, 10) : null;
 const seedOverride = parseFlag('seed');
+const evalTest = !!parseFlag('eval-test');
 
 const node = new IaADN();
 await node.boot({ simulate: simulateGenerations != null, seed: seedOverride || null });
@@ -425,7 +465,7 @@ console.log(`IOTAI: ${status.iotaiConnected ? 'connected' : 'standalone'}`);
 
 if (simulateGenerations != null) {
   // Fast simulation mode: run the generations and exit — no daemon, no API left dangling
-  await node.runSimulation(simulateGenerations);
+  await node.runSimulation(simulateGenerations, { evalTest });
   await node.shutdown();
   process.exit(0);
 } else if (args.includes('--daemon')) {

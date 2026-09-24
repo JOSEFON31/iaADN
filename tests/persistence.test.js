@@ -52,6 +52,21 @@ describe('PersistenceStore', () => {
     });
   });
 
+  it('lists recorded generations oldest-first, honoring the limit', () => {
+    withTempStore(store => {
+      for (let g = 1; g <= 5; g++) {
+        store.recordGeneration(g, { populationSize: g, avgFitness: g / 10, bestFitness: g / 5 }, 'seedX');
+      }
+
+      const all = store.listGenerations(100);
+      assert.deepEqual(all.map(g => g.generation), [1, 2, 3, 4, 5]);
+      assert.equal(all[0].avgFitness, 0.1);
+
+      const limited = store.listGenerations(2);
+      assert.deepEqual(limited.map(g => g.generation), [4, 5], 'the most recent N, still oldest-first');
+    });
+  });
+
   it('reopening an existing database file keeps previously recorded data', () => {
     const dir = mkdtempSync(join(tmpdir(), 'iaadn-test-'));
     const dbPath = join(dir, 'test.db');

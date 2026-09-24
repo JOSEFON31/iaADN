@@ -1,7 +1,7 @@
 // iaADN - Mutation Engine: applies random changes to genomes
 // Like biological DNA mutations — small random changes that may improve or worsen fitness
 
-import { Gene, GENE_TYPES } from '../genome/gene.js';
+import { Gene, GENE_TYPES, REASONING_MODES } from '../genome/gene.js';
 import { rng } from '../util/rng.js';
 
 export class MutationEngine {
@@ -41,6 +41,8 @@ export class MutationEngine {
         return this._mutatePersonality(gene);
       case GENE_TYPES.ADAPTER:
         return this._mutateAdapter(gene);
+      case GENE_TYPES.STRATEGY:
+        return this._mutateStrategy(gene);
       case GENE_TYPES.MODEL:
         // Model mutations are extremely rare (handled by mutability = 0.05)
         return null;
@@ -168,6 +170,18 @@ export class MutationEngine {
     gene.value[key] = Math.max(0, Math.min(1, oldValue + delta));
 
     return { gene: gene.name, type: 'personality_drift', key, oldValue, newValue: gene.value[key] };
+  }
+
+  // Mutate the reasoning strategy: switch to a different discrete mode
+  _mutateStrategy(gene) {
+    const modes = Object.keys(REASONING_MODES);
+    const oldValue = gene.value;
+    let newValue = rng.pick(modes);
+    // Try once to actually change it — with only 3 choices, picking the same
+    // one again is common enough to be worth a retry, not worth a loop.
+    if (newValue === oldValue && modes.length > 1) newValue = rng.pick(modes);
+    gene.value = newValue;
+    return { gene: gene.name, type: 'strategy_swap', oldValue, newValue };
   }
 
   // Mutate adapter reference

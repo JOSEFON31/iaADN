@@ -38,6 +38,9 @@ export class PersistenceStore {
     this._selectAlive = this.db.prepare(`SELECT * FROM instances WHERE alive = 1`);
     this._selectAll = this.db.prepare(`SELECT * FROM instances`);
     this._selectMaxGeneration = this.db.prepare(`SELECT MAX(generation) AS maxGen FROM generations`);
+    this._selectRecentGenerations = this.db.prepare(`
+      SELECT generation, stats_json, seed, recorded_at FROM generations ORDER BY generation DESC LIMIT ?
+    `);
     this._selectMeta = this.db.prepare(`SELECT value FROM meta WHERE key = ?`);
     this._upsertMeta = this.db.prepare(`
       INSERT INTO meta (key, value) VALUES (@key, @value)
@@ -146,6 +149,19 @@ export class PersistenceStore {
   getLastGeneration() {
     const row = this._selectMaxGeneration.get();
     return row?.maxGen || 0;
+  }
+
+  // Most recent generations (oldest first), for a fitness-over-time view —
+  // see GET /api/generations in src/integration/api.js.
+  listGenerations(limit = 100) {
+    return this._selectRecentGenerations.all(limit)
+      .reverse()
+      .map(row => ({
+        generation: row.generation,
+        seed: row.seed,
+        recordedAt: row.recorded_at,
+        ...JSON.parse(row.stats_json),
+      }));
   }
 
   close() {

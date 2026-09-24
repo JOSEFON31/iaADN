@@ -5,6 +5,7 @@ import { MutationEngine } from './mutation.js';
 import { CrossoverEngine } from './crossover.js';
 import { SelectionEngine } from './selection.js';
 import { FitnessEvaluator } from './fitness.js';
+import { SpeciesManager } from './species.js';
 import { getConfig } from '../config.js';
 import { rng, getSeed } from '../util/rng.js';
 
@@ -30,6 +31,7 @@ export class Population {
       elitismCount: config.elitismCount,
     });
     this.fitnessEvaluator = new FitnessEvaluator();
+    this.speciesManager = new SpeciesManager();
 
     this.maxSize = config.populationSize;
     this.crossoverRate = config.crossoverRate;
@@ -123,7 +125,7 @@ export class Population {
       for (const inst of living) {
         try {
           const result = await inferenceEngine.complete(
-            [{ role: 'user', content: task.prompt }],
+            [{ role: 'user', content: inst.genome.applyReasoningMode(task.prompt) }],
             { systemPrompt: inst.genome.getSystemPrompt(), maxTokens: 200, ...inst.genome.getInferenceConfig() }
           );
           responses.push({
@@ -186,15 +188,28 @@ export class Population {
       }
     }
 
-    // 4. Survival selection (trim to carrying capacity)
+    // 4. Species classification — used for niche-protected survival below
+    // and reported in getStats(). A code specialist that's the best in its
+    // niche is protected from being trimmed just because generalists score
+    // marginally higher overall. See docs/PLAN_EVOLUCION.md Fase 2.
     const allLiving = this.getLiving();
     const allGenomes = allLiving.map(i => i.genome);
+    const species = this.speciesManager.classify(allGenomes);
 
+    // 5. Survival selection (trim to carrying capacity)
     if (allGenomes.length > this.maxSize) {
+      const bestPerSpecies = species.map(sp =>
+        sp.members.reduce((best, g) =>
+          (this.fitnessScores.get(g.instanceId) ?? 0) > (this.fitnessScores.get(best.instanceId) ?? 0) ? g : best
+        )
+      );
+      const protectedIds = new Set(bestPerSpecies.map(g => g.instanceId));
+
       const { casualties } = this.selectionEngine.survivalSelection(
         allGenomes,
         this.fitnessScores,
-        this.maxSize
+        this.maxSize,
+        protectedIds
       );
 
       for (const casualty of casualties) {
@@ -203,7 +218,7 @@ export class Population {
       }
     }
 
-    // 5. Record generation event
+    // 6. Record generation event
     const stats = this.getStats();
     this.auditLog.logGeneration(this.generation, stats);
     this.persistence?.recordGeneration(this.generation, stats, getSeed());
@@ -277,6 +292,7 @@ export class Population {
       avgFitness: Math.round(avgFitness * 1000) / 1000,
       bestFitness: Math.round(bestFitness * 1000) / 1000,
       totalEverLived: this.lineage.tree.size,
+      speciesCount: this.speciesManager.getCount(),
     };
   }
 

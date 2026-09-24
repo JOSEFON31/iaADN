@@ -29,6 +29,7 @@ export class API {
     lineage,
     guardian,
     killSwitch,
+    persistence = null,
     nodeId,
     port = 9091,
     host = '127.0.0.1',
@@ -45,6 +46,7 @@ export class API {
     this.lineage = lineage;
     this.guardian = guardian;
     this.killSwitch = killSwitch;
+    this.persistence = persistence;
     this.nodeId = nodeId;
     this.port = port;
     this.host = host;
@@ -111,6 +113,9 @@ export class API {
       }
       if (path === '/api/lineage') {
         return this._handleLineage(res);
+      }
+      if (path === '/api/generations') {
+        return this._handleGenerations(res, url.searchParams);
       }
       if (path === '/api/health') {
         return this._json(res, { healthy: !this.killSwitch.isActive() });
@@ -268,6 +273,18 @@ export class API {
       stats: this.lineage.getStats(),
       tree: this.lineage.toJSON().slice(-50), // last 50 entries
     });
+  }
+
+  // Fitness-over-time — reads generations already recorded by
+  // PersistenceStore (src/evolution/population.js writes one row per
+  // generation), so this adds no new storage. See docs/PLAN_EVOLUCION.md
+  // Fase 2 — "lineage dashboard".
+  _handleGenerations(res, searchParams) {
+    if (!this.persistence) {
+      return this._json(res, { generations: [] });
+    }
+    const limit = Math.min(500, Math.max(1, parseInt(searchParams.get('limit'), 10) || 100));
+    return this._json(res, { generations: this.persistence.listGenerations(limit) });
   }
 
   _json(res, data, status = 200) {
