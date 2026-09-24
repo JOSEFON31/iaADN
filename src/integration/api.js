@@ -21,6 +21,10 @@ class HttpError extends Error {
   }
 }
 
+function normalizeForMatch(text) {
+  return String(text).trim().toLowerCase();
+}
+
 export class API {
   constructor({
     hiveMind,
@@ -117,6 +121,10 @@ export class API {
       if (path === '/api/generations') {
         return this._handleGenerations(res, url.searchParams);
       }
+      const rateMatch = path.match(/^\/api\/interactions\/(\d+)\/rate$/);
+      if (rateMatch && req.method === 'POST') {
+        return await this._handleRate(req, res, Number(rateMatch[1]));
+      }
       if (path === '/api/health') {
         return this._json(res, { healthy: !this.killSwitch.isActive() });
       }
@@ -183,6 +191,18 @@ export class API {
       return this._json(res, { error: `Message too long (max ${this.maxMessageChars} characters)` }, 400);
     }
 
+    // Recall: if this is (near enough) a question already asked and rated
+    // 👍, answer straight from memory instead of calling the model again —
+    // real reuse of what was learned, not just storage nobody reads. See
+    // docs/PLAN_EVOLUCION.md Fase 3.
+    const memoryMatch = this.persistence?.searchMemory(message, 1)?.[0];
+    if (memoryMatch && normalizeForMatch(memoryMatch.query) === normalizeForMatch(message)) {
+      return this._json(res, {
+        response: memoryMatch.response,
+        metadata: { mode: 'memory', interactionId: memoryMatch.interactionId },
+      });
+    }
+
     // Direct inference — fast path, single inference call
     // (HiveMind decompose+distribute is too slow on low-end hardware for interactive chat)
     if (this.inferenceEngine?.ready) {
@@ -207,6 +227,13 @@ export class API {
           }),
         ]);
 
+        const interactionId = this.persistence?.recordInteraction({
+          query: message,
+          response: result.content,
+          instanceId: best?.genome?.instanceId || null,
+          source: 'chat',
+        }) ?? null;
+
         return this._json(res, {
           response: result.content,
           metadata: {
@@ -214,6 +241,7 @@ export class API {
             model: result.model,
             instanceId: best?.genome?.instanceId || null,
             fitness: best?.fitness || null,
+            interactionId,
           },
         });
       } catch (err) {
@@ -285,6 +313,34 @@ export class API {
     }
     const limit = Math.min(500, Math.max(1, parseInt(searchParams.get('limit'), 10) || 100));
     return this._json(res, { generations: this.persistence.listGenerations(limit) });
+  }
+
+  // 👍/👎 on a chat reply — see docs/PLAN_EVOLUCION.md Fase 3. A positive
+  // rating makes the exchange searchable via PersistenceStore.searchMemory;
+  // a negative one removes it if it was there.
+  async _handleRate(req, res, id) {
+    if (!this.persistence) {
+      return this._json(res, { error: 'Not available' }, 404);
+    }
+
+    const body = await this._readBody(req);
+    let parsed;
+    try {
+      parsed = JSON.parse(body);
+    } catch {
+      throw new HttpError(400, 'Invalid JSON body');
+    }
+
+    const rating = parsed?.rating;
+    if (rating !== 1 && rating !== -1) {
+      return this._json(res, { error: 'rating must be 1 or -1' }, 400);
+    }
+
+    const found = this.persistence.rateInteraction(id, rating);
+    if (!found) {
+      return this._json(res, { error: 'Interaction not found' }, 404);
+    }
+    return this._json(res, { id, rating });
   }
 
   _json(res, data, status = 200) {

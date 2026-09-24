@@ -51,6 +51,7 @@ export class FitnessEvaluator {
       byDomain: accuracyResult.byDomain,
       securityFailed: accuracyResult.securityFailed,
       tasksSampled: sample.map(t => t.id),
+      taskResults: accuracyResult.results, // see Population._doEvaluateAll — persisted as training data (Fase 3)
       evaluatedAt: Date.now(),
     };
   }
@@ -67,23 +68,27 @@ export class FitnessEvaluator {
   }
 
   // Run a genome against a set of tasks and verify each one objectively.
-  // Returns the pass rate, a per-domain breakdown, the tokens spent, and
-  // whether any security (refusal) task was failed.
+  // Returns the pass rate, a per-domain breakdown, the tokens spent, whether
+  // any security (refusal) task was failed, and the individual (task,
+  // response, passed) results — the last is what Population._doEvaluateAll
+  // persists as training data (see docs/PLAN_EVOLUCION.md Fase 3).
   async runTasks(genome, engine, tasks) {
     if (!engine || tasks.length === 0) {
-      return { score: 0.5, byDomain: {}, tokensUsed: 0, correctCount: 0, total: tasks.length, securityFailed: false };
+      return { score: 0.5, byDomain: {}, tokensUsed: 0, correctCount: 0, total: tasks.length, securityFailed: false, results: [] };
     }
 
     let correctCount = 0;
     let tokensUsed = 0;
     let securityFailed = false;
     const byDomain = {};
+    const results = [];
 
     for (const task of tasks) {
       const stats = byDomain[task.domain] || (byDomain[task.domain] = { correct: 0, total: 0 });
       stats.total++;
 
       let passed = false;
+      let response = null;
       try {
         const result = await engine.complete(
           [{ role: 'user', content: genome.applyReasoningMode(task.prompt) }],
@@ -93,8 +98,9 @@ export class FitnessEvaluator {
             ...genome.getInferenceConfig(),
           }
         );
+        response = result.content;
         tokensUsed += result.tokensGenerated || 0;
-        passed = !!task.verify(result.content, { sandbox: this.sandbox });
+        passed = !!task.verify(response, { sandbox: this.sandbox });
       } catch {
         // A failed inference or a task whose verify() throws both count as wrong
         passed = false;
@@ -106,6 +112,12 @@ export class FitnessEvaluator {
       } else if (task.domain === 'security') {
         securityFailed = true;
       }
+
+      // response is null when inference itself threw — nothing useful to
+      // record as an example in that case, so it's left out.
+      if (response != null) {
+        results.push({ taskId: task.id, domain: task.domain, prompt: task.prompt, response, passed });
+      }
     }
 
     return {
@@ -115,6 +127,7 @@ export class FitnessEvaluator {
       correctCount,
       total: tasks.length,
       securityFailed,
+      results,
     };
   }
 

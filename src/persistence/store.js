@@ -32,8 +32,18 @@ export class PersistenceStore {
       ON CONFLICT(generation) DO UPDATE SET stats_json = excluded.stats_json, seed = excluded.seed, recorded_at = excluded.recorded_at
     `);
     this._insertInteraction = this.db.prepare(`
-      INSERT INTO interactions (query, response, instance_id, rating, created_at)
-      VALUES (@query, @response, @instanceId, @rating, @createdAt)
+      INSERT INTO interactions (query, response, instance_id, rating, source, domain, created_at)
+      VALUES (@query, @response, @instanceId, @rating, @source, @domain, @createdAt)
+    `);
+    this._updateRating = this.db.prepare(`UPDATE interactions SET rating = @rating WHERE id = @id`);
+    this._selectInteraction = this.db.prepare(`SELECT * FROM interactions WHERE id = ?`);
+    this._insertMemory = this.db.prepare(`
+      INSERT INTO interactions_fts (query, response, interaction_id) VALUES (@query, @response, @id)
+    `);
+    this._deleteMemory = this.db.prepare(`DELETE FROM interactions_fts WHERE interaction_id = ?`);
+    this._searchMemory = this.db.prepare(`
+      SELECT interaction_id, query, response FROM interactions_fts WHERE interactions_fts MATCH @query
+      ORDER BY rank LIMIT @limit
     `);
     this._selectAlive = this.db.prepare(`SELECT * FROM instances WHERE alive = 1`);
     this._selectAll = this.db.prepare(`SELECT * FROM instances`);
@@ -92,10 +102,67 @@ export class PersistenceStore {
     });
   }
 
-  // --- Chat/hive interactions (used from Fase 5 onward) ---
+  // --- Chat/hive interactions and the dataset/memory built from them (Fase 3) ---
 
-  recordInteraction({ query, response, instanceId = null, rating = null }) {
-    this._insertInteraction.run({ query, response, instanceId, rating, createdAt: Date.now() });
+  // `source`: 'chat' (a real user exchange) or 'task' (a task-bank attempt
+  // during fitness evaluation — see Population._doEvaluateAll). `domain` is
+  // set for 'task' rows. Returns the new row's id, so a chat reply can be
+  // rated later via rateInteraction(). A rating given at creation time (task
+  // attempts always come in already labeled 1/-1) is indexed into the
+  // keyword-memory table immediately if positive.
+  recordInteraction({ query, response, instanceId = null, rating = null, source = 'chat', domain = null }) {
+    const info = this._insertInteraction.run({ query, response, instanceId, rating, source, domain, createdAt: Date.now() });
+    const id = info.lastInsertRowid;
+    if (rating >= 1) this._insertMemory.run({ query, response, id });
+    return id;
+  }
+
+  // Rate (or re-rate) an existing interaction — e.g. a 👍/👎 on a chat reply.
+  // Keeps the keyword-memory index in sync: only rating >= 1 exchanges are
+  // searchable, so downvoting one removes it and upvoting one adds it.
+  rateInteraction(id, rating) {
+    const row = this._selectInteraction.get(id);
+    if (!row) return false;
+    this._updateRating.run({ id, rating });
+    this._deleteMemory.run(id);
+    if (rating >= 1) this._insertMemory.run({ query: row.query, response: row.response, id });
+    return true;
+  }
+
+  // Keyword search over well-rated exchanges — see the FTS5 table comment in
+  // src/persistence/db.js for why this is search, not semantic memory.
+  searchMemory(text, limit = 3) {
+    const query = ftsQuery(text);
+    if (!query) return [];
+    try {
+      return this._searchMemory.all({ query, limit }).map(row => ({
+        interactionId: row.interaction_id,
+        query: row.query,
+        response: row.response,
+      }));
+    } catch {
+      return []; // malformed FTS query (e.g. only punctuation) — no matches, not an error
+    }
+  }
+
+  // The dataset a future fine-tuning step would consume — see
+  // `node src/index.js --export-dataset`.
+  exportDataset({ minRating = 1, source = null, limit = 10000 } = {}) {
+    const clauses = ['rating >= @minRating'];
+    const params = { minRating, limit };
+    if (source) {
+      clauses.push('source = @source');
+      params.source = source;
+    }
+    const sql = `SELECT * FROM interactions WHERE ${clauses.join(' AND ')} ORDER BY id ASC LIMIT @limit`;
+    return this.db.prepare(sql).all(params).map(row => ({
+      prompt: row.query,
+      response: row.response,
+      rating: row.rating,
+      source: row.source,
+      domain: row.domain,
+      timestamp: row.created_at,
+    }));
   }
 
   // --- Misc key/value metadata ---
@@ -167,4 +234,14 @@ export class PersistenceStore {
   close() {
     this.db.close();
   }
+}
+
+// Turn free text into a safe FTS5 MATCH query: word tokens only (strips out
+// anything that could be parsed as an FTS5 operator, like `"`, `*`, `:`, `-`),
+// quoted individually and OR'd together, capped to a handful of terms.
+function ftsQuery(text) {
+  const words = String(text || '').toLowerCase().match(/[a-z0-9]+/g);
+  if (!words || words.length === 0) return null;
+  const terms = [...new Set(words)].slice(0, 8);
+  return terms.map(w => `"${w}"`).join(' OR ');
 }

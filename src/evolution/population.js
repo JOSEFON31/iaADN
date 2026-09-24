@@ -101,6 +101,21 @@ export class Population {
         this.lineage.updateFitness(inst.genome.instanceId, result.overall);
         this.auditLog.logFitness(inst.genome.instanceId, result);
         this.persistence?.recordFitnessDetail(inst.genome.instanceId, result);
+
+        // Every verified task attempt this generation becomes training data:
+        // correct -> positive example, wrong -> negative — real labels, not
+        // fabricated, straight from what fitness evaluation already runs.
+        // See docs/PLAN_EVOLUCION.md Fase 3.
+        for (const taskResult of result.taskResults || []) {
+          this.persistence?.recordInteraction({
+            query: taskResult.prompt,
+            response: taskResult.response,
+            instanceId: inst.genome.instanceId,
+            rating: taskResult.passed ? 1 : -1,
+            source: 'task',
+            domain: taskResult.domain,
+          });
+        }
       } catch (err) {
         // If evaluation fails, assign minimum fitness
         inst.fitness = 0.1;

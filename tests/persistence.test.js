@@ -110,6 +110,100 @@ describe('PersistenceStore', () => {
   });
 });
 
+describe('PersistenceStore interactions/memory/dataset (Fase 3)', () => {
+  it('records an interaction and returns its id', () => {
+    withTempStore(store => {
+      const id = store.recordInteraction({ query: 'hi', response: 'hello', source: 'chat' });
+      assert.equal(typeof id, 'number');
+      assert.ok(id > 0);
+    });
+  });
+
+  it('rateInteraction updates the rating and reports whether the row existed', () => {
+    withTempStore(store => {
+      const id = store.recordInteraction({ query: 'q', response: 'a' });
+      assert.equal(store.rateInteraction(id, 1), true);
+      assert.equal(store.rateInteraction(999999, 1), false);
+    });
+  });
+
+  it('searchMemory only surfaces interactions rated 1 or higher', () => {
+    withTempStore(store => {
+      store.recordInteraction({ query: 'capital of France', response: 'Paris', rating: 1 });
+      store.recordInteraction({ query: 'capital of Germany', response: 'Berlin' }); // unrated
+      store.recordInteraction({ query: 'capital of Spain', response: 'wrong', rating: -1 });
+
+      const results = store.searchMemory('capital');
+      assert.equal(results.length, 1);
+      assert.equal(results[0].response, 'Paris');
+    });
+  });
+
+  it('a later negative rating removes an interaction from memory', () => {
+    withTempStore(store => {
+      const id = store.recordInteraction({ query: 'capital of France', response: 'Paris', rating: 1 });
+      assert.equal(store.searchMemory('capital').length, 1);
+      store.rateInteraction(id, -1);
+      assert.equal(store.searchMemory('capital').length, 0);
+    });
+  });
+
+  it('searchMemory tolerates queries with no usable words or no matches', () => {
+    withTempStore(store => {
+      store.recordInteraction({ query: 'capital of France', response: 'Paris', rating: 1 });
+      assert.deepEqual(store.searchMemory('###'), []);
+      assert.deepEqual(store.searchMemory(''), []);
+      assert.deepEqual(store.searchMemory('quantum entanglement'), []);
+    });
+  });
+
+  it('exportDataset filters by minRating and source', () => {
+    withTempStore(store => {
+      store.recordInteraction({ query: 'q1', response: 'a1', rating: 1, source: 'chat' });
+      store.recordInteraction({ query: 'q2', response: 'a2', rating: -1, source: 'task', domain: 'math' });
+      store.recordInteraction({ query: 'q3', response: 'a3', source: 'chat' }); // unrated, null
+
+      const positive = store.exportDataset({ minRating: 1 });
+      assert.deepEqual(positive.map(r => r.prompt), ['q1']);
+
+      const all = store.exportDataset({ minRating: -1 });
+      assert.equal(all.length, 2, 'unrated (null) rows are excluded, both rated ones included');
+
+      const tasksOnly = store.exportDataset({ minRating: -1, source: 'task' });
+      assert.deepEqual(tasksOnly.map(r => r.prompt), ['q2']);
+      assert.equal(tasksOnly[0].domain, 'math');
+    });
+  });
+
+  it('opening a database created before source/domain existed still works (migration)', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'iaadn-test-'));
+    const dbPath = join(dir, 'test.db');
+
+    // Simulate an old database: create the table without the new columns.
+    const OldDatabase = (await import('better-sqlite3')).default;
+    const oldDb = new OldDatabase(dbPath);
+    oldDb.exec(`
+      CREATE TABLE interactions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        query TEXT NOT NULL,
+        response TEXT,
+        instance_id TEXT,
+        rating INTEGER,
+        created_at INTEGER NOT NULL
+      );
+    `);
+    oldDb.close();
+
+    const store = new PersistenceStore(dbPath);
+    const id = store.recordInteraction({ query: 'q', response: 'a', rating: 1, source: 'chat', domain: null });
+    assert.ok(id > 0);
+    assert.equal(store.exportDataset({ minRating: 1 })[0].source, 'chat');
+    store.close();
+
+    rmSync(dir, { recursive: true, force: true });
+  });
+});
+
 describe('Lineage + PersistenceStore integration', () => {
   it('mirrors births, deaths and fitness updates automatically', () => {
     withTempStore(store => {

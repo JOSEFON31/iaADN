@@ -231,19 +231,32 @@ de forma fiable al genoma génesis en el test oculto — el delta cambia de sign
 resultado correcto y esperable dado que el simulado no liga la calidad del genoma a si acierta una tarea; el
 criterio real de la Fase 2 queda pendiente de comprobar con un modelo cargado de verdad.
 
-### Fase 3 — Autoaprendizaje (3–4 semanas)
+### Fase 3 — Autoaprendizaje (3–4 semanas) — 🟡 primera tanda hecha (sin GPU ni modelo real, ver abajo)
 
-- **Memoria a largo plazo:** base vectorial local (`sqlite-vec` o similar) con conocimiento extraído de interacciones útiles.
-- **Dataset que se construye solo:** cada interacción con 👍, cada tarea resuelta y verificada → ejemplo de entrenamiento.
-  Filtro de calidad + deduplicación; lo que tenga 👎 o falle verificación → ejemplo negativo (para DPO).
-- **Fine-tuning LoRA periódico** (proceso Python separado: `llama.cpp` finetune, `unsloth` o `peft`) sobre el dataset.
-  Cada entrenamiento genera un **hijo** con el nuevo adaptador; entra a competir como cualquier otro.
-- **Cruce de pesos:** fusionar LoRA de dos padres (media ponderada / TIES-merging) = reproducción sexual real.
-- **Aprender de fuentes externas** (opcional): lista blanca de fuentes (Wikipedia dumps, documentación) descargadas
-  por el orquestador, no por los agentes; se convierte en tareas y memoria.
-- **Destilación:** un modelo más grande (local o API) genera respuestas de referencia para tareas difíciles.
+- **Dataset que se construye solo — hecho.** `PersistenceStore.recordInteraction()` existía desde la Fase 0 pero
+  nadie la llamaba nunca. Ahora: cada respuesta del chat se guarda (`POST /api/chat`, sin puntuar todavía), con
+  botones 👍/👎 reales en `docs/chat.html` (`POST /api/interactions/:id/rate`); y cada intento de tarea verificado
+  durante la evaluación de fitness se guarda automáticamente como ejemplo positivo o negativo
+  (`Population._doEvaluateAll`, usando el resultado real de `task.verify()`, no inventado). `node src/index.js
+  --export-dataset` vuelca todo esto a JSONL. **Verificado de verdad:** una simulación de 15 generaciones produjo
+  792 ejemplos reales (584 positivos, 208 negativos) con las seis etiquetas de dominio de la Fase 1.
+- **Memoria — hecha, pero con un cambio de alcance explícito.** El plan pedía una "base vectorial local"; eso
+  necesita embeddings de un modelo real, que este proyecto no tiene cargado. En su lugar: búsqueda por palabras
+  clave con FTS5 de SQLite (`PersistenceStore.searchMemory`) sobre los intercambios puntuados con 👍. El chat la
+  usa de verdad: si preguntas casi lo mismo que ya se preguntó y se valoró bien, responde desde la memoria sin
+  volver a llamar al modelo (`metadata.mode: 'memory'`, verificado con curl y en el navegador). No es la memoria
+  semántica que pedía el plan — es la versión honesta de lo que se puede hacer sin un modelo de embeddings.
+- **Fine-tuning LoRA, fusión de adaptadores, destilación — NO hechos, a propósito.** Este entorno no tiene GPU, no
+  tiene un modelo GGUF real cargado, y escribir un pipeline de entrenamiento que no se puede ejecutar ni
+  verificar rompería la práctica seguida en las Fases 0–2 (todo lo que se ha dado por hecho, se ha corrido de
+  verdad). Lo que sí se entrega es la pieza que ese pipeline necesitaría como entrada — el dataset exportado de
+  arriba — para que sea un cimiento real, no un simulacro.
+- **Aprender de fuentes externas — NO hecho.** Necesita una lista blanca deliberada y acceso a internet; queda
+  fuera de esta tanda a propósito, es el único punto de la Fase 3 con riesgo real de cara al exterior y merece
+  su propia decisión explícita antes de tocarlo.
 
-**Salida:** el mejor agente con LoRA supera al mejor sin LoRA en el test oculto, y la mejora se mantiene 3 ciclos seguidos.
+**Salida:** no evaluable todavía — depende de un adaptador LoRA real que compare contra la línea base, y eso
+depende de tener un modelo cargado y GPU disponible, ninguno de los dos presente en este entorno.
 
 ### Fase 4 — Autorreplicación controlada (2–3 semanas)
 

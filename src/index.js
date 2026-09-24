@@ -433,6 +433,13 @@ function resolveApiToken(config) {
 // --- Main ---
 const args = process.argv.slice(2);
 
+function parseFlag(name) {
+  const arg = args.find(a => a === `--${name}` || a.startsWith(`--${name}=`));
+  if (!arg) return null;
+  const eq = arg.indexOf('=');
+  return eq === -1 ? true : arg.slice(eq + 1);
+}
+
 if (args.includes('--show-token')) {
   // Deliberate, owner-initiated read of the API token — prints it and exits
   // without booting the rest of the system.
@@ -440,11 +447,26 @@ if (args.includes('--show-token')) {
   process.exit(0);
 }
 
-function parseFlag(name) {
-  const arg = args.find(a => a === `--${name}` || a.startsWith(`--${name}=`));
-  if (!arg) return null;
-  const eq = arg.indexOf('=');
-  return eq === -1 ? true : arg.slice(eq + 1);
+const exportDatasetFlag = parseFlag('export-dataset');
+if (exportDatasetFlag) {
+  // Dumps the dataset PersistenceStore has been accumulating (chat replies
+  // rated 👍/👎, plus every verified task-bank attempt from fitness
+  // evaluation) as JSONL — the input a future fine-tuning step would read.
+  // See docs/PLAN_EVOLUCION.md Fase 3. No need to boot the rest of the
+  // system for this.
+  const store = new PersistenceStore();
+  const rows = store.exportDataset({ minRating: -1 }); // include negatives too — see --export-dataset docs
+  store.close();
+
+  const outPath = exportDatasetFlag === true
+    ? resolve(getConfig().paths.data, 'training', `dataset-${Date.now()}.jsonl`)
+    : resolve(exportDatasetFlag);
+  mkdirSync(dirname(outPath), { recursive: true });
+  writeFileSync(outPath, rows.map(r => JSON.stringify(r)).join('\n') + (rows.length ? '\n' : ''));
+
+  console.log(`[ExportDataset] Wrote ${rows.length} example(s) to ${outPath}`);
+  console.log(`[ExportDataset] Positive (rating >= 1): ${rows.filter(r => r.rating >= 1).length}, negative: ${rows.filter(r => r.rating < 0).length}`);
+  process.exit(0);
 }
 
 const simulateFlag = parseFlag('simulate');

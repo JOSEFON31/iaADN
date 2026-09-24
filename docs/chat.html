@@ -186,6 +186,20 @@
     .message.ai .msg-meta { color: var(--text-dim); }
     .message.user .msg-meta { color: rgba(255,255,255,0.6); }
 
+    .rating-row { display: flex; gap: 6px; margin-top: 6px; }
+    .rate-btn {
+      background: none;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 2px 8px;
+      font-size: 0.85em;
+      cursor: pointer;
+      opacity: 0.6;
+    }
+    .rate-btn:hover:not(:disabled) { opacity: 1; border-color: var(--accent); }
+    .rate-btn:disabled { cursor: default; }
+    .rate-btn.rated { opacity: 1; border-color: var(--accent2); background: rgba(162,155,254,0.15); }
+
     .message.system {
       align-self: center;
       background: none;
@@ -430,7 +444,7 @@ inputEl.addEventListener('keydown', (e) => {
   }
 });
 
-function addMessage(text, type, meta) {
+function addMessage(text, type, meta, interactionId) {
   const div = document.createElement('div');
   div.className = `message ${type}`;
   div.textContent = text;
@@ -440,8 +454,49 @@ function addMessage(text, type, meta) {
     metaDiv.textContent = meta;
     div.appendChild(metaDiv);
   }
+  if (type === 'ai' && interactionId != null) {
+    div.appendChild(buildRatingRow(interactionId));
+  }
   messagesEl.appendChild(div);
   messagesEl.scrollTop = messagesEl.scrollHeight;
+}
+
+// 👍/👎 on a chat reply — see docs/PLAN_EVOLUCION.md Fase 3. A 👍 makes the
+// exchange recallable later (PersistenceStore.searchMemory); either one is
+// just recorded as feedback.
+function buildRatingRow(interactionId) {
+  const row = document.createElement('div');
+  row.className = 'rating-row';
+
+  const rate = async (rating, btn, otherBtn) => {
+    btn.disabled = true;
+    otherBtn.disabled = true;
+    try {
+      await apiFetch(`/api/interactions/${interactionId}/rate`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ rating }),
+      });
+      btn.classList.add('rated');
+    } catch {
+      btn.disabled = false;
+      otherBtn.disabled = false;
+    }
+  };
+
+  const up = document.createElement('button');
+  up.className = 'rate-btn';
+  up.type = 'button';
+  up.textContent = '👍';
+  const down = document.createElement('button');
+  down.className = 'rate-btn';
+  down.type = 'button';
+  down.textContent = '👎';
+
+  up.addEventListener('click', () => rate(1, up, down));
+  down.addEventListener('click', () => rate(-1, down, up));
+  row.append(up, down);
+  return row;
 }
 
 async function sendMessage() {
@@ -470,7 +525,7 @@ async function sendMessage() {
       const meta = data.metadata
         ? `${data.metadata.mode || data.metadata.decomposition || ''} | ${data.metadata.elapsed ? data.metadata.elapsed + 'ms' : ''} | instances: ${data.metadata.instancesUsed ?? '?'}`
         : '';
-      addMessage(data.response, 'ai', meta);
+      addMessage(data.response, 'ai', meta, data.metadata?.interactionId);
     }
   } catch (err) {
     if (!(err instanceof UnauthorizedError)) {

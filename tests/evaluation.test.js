@@ -12,6 +12,14 @@ import { Genome } from '../src/genome/genome.js';
 import { Rng } from '../src/util/rng.js';
 import { InferenceEngine } from '../src/inference/engine.js';
 import { MockBackend } from '../src/inference/mock-backend.js';
+import { Population } from '../src/evolution/population.js';
+import { PersistenceStore } from '../src/persistence/store.js';
+import { Lineage } from '../src/genome/lineage.js';
+import { SafetyGuardian } from '../src/safety/guardian.js';
+import { AuditLog } from '../src/safety/audit-log.js';
+import { mkdtempSync, rmSync } from 'fs';
+import { tmpdir } from 'os';
+import { join } from 'path';
 
 describe('task bank contents', () => {
   it('every task has a unique id and passes its own reference answer', () => {
@@ -154,4 +162,65 @@ describe('FitnessEvaluator end-to-end (mock backend)', () => {
     assert.equal(scores.get('b'), 1);
     assert.equal(scores.get('c'), 0);
   });
+
+  it('runTasks reports each individual (task, response, passed) result — the raw material for Fase 3 training data', async () => {
+    const engine = await makeEngine();
+    const evaluator = new FitnessEvaluator();
+    const genome = Genome.createGenesis('test');
+    const sample = evaluator.taskBank.sample({ rng: new Rng('results-shape'), count: 5 });
+
+    const result = await evaluator.runTasks(genome, engine, sample);
+
+    assert.equal(result.results.length, sample.length);
+    for (const r of result.results) {
+      assert.equal(typeof r.taskId, 'string');
+      assert.equal(typeof r.domain, 'string');
+      assert.equal(typeof r.prompt, 'string');
+      assert.equal(typeof r.response, 'string');
+      assert.equal(typeof r.passed, 'boolean');
+    }
+    assert.equal(result.results.filter(r => r.passed).length, result.correctCount);
+  });
+});
+
+describe('Population persists task attempts as training data (Fase 3)', () => {
+  function withRealPopulation(fn) {
+    const dir = mkdtempSync(join(tmpdir(), 'iaadn-test-'));
+    return (async () => {
+      const persistence = new PersistenceStore(join(dir, 'test.db'));
+      const auditLog = new AuditLog(join(dir, 'audit'));
+      const guardian = new SafetyGuardian(auditLog);
+      const lineage = new Lineage({ persistence });
+      const population = new Population({ guardian, lineage, auditLog, persistence });
+      try {
+        await fn(population, persistence);
+      } finally {
+        persistence.close();
+        rmSync(dir, { recursive: true, force: true });
+      }
+    })();
+  }
+
+  it('evaluateAll records every sampled task attempt with source="task" and a correctness-derived rating', () => withRealPopulation(async (population, persistence) => {
+    const engine = await (async () => {
+      const e = new InferenceEngine(new MockBackend());
+      await e.initialize();
+      return e;
+    })();
+
+    const genomeA = Genome.createGenesis('test');
+    const genomeB = Genome.createGenesis('test');
+    population.addInstance(genomeA);
+    population.addInstance(genomeB);
+
+    await population.evaluateAll(engine);
+
+    const dataset = persistence.exportDataset({ minRating: -1, source: 'task' });
+    assert.ok(dataset.length > 0, 'at least one task attempt should have been recorded');
+    for (const row of dataset) {
+      assert.equal(row.source, 'task');
+      assert.ok([1, -1].includes(row.rating));
+      assert.equal(typeof row.domain, 'string');
+    }
+  }));
 });

@@ -2,12 +2,16 @@
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { request } from 'http';
+import { mkdtempSync, rmSync } from 'fs';
+import { tmpdir } from 'os';
+import { join } from 'path';
 import { API } from '../src/integration/api.js';
 import { verifyToken, RateLimiter } from '../src/integration/auth.js';
 import { InferenceEngine } from '../src/inference/engine.js';
 import { MockBackend } from '../src/inference/mock-backend.js';
 import { Genome } from '../src/genome/genome.js';
 import { Lineage } from '../src/genome/lineage.js';
+import { PersistenceStore } from '../src/persistence/store.js';
 
 const TOKEN = 'test-token-0123456789';
 
@@ -245,4 +249,87 @@ describe('API with allowed origins and rate limit', () => {
       proxied.stop();
     }
   });
+});
+
+describe('API with a real persistence store (Fase 3: interactions, rating, memory)', () => {
+  function withApiAndStore(fn) {
+    const dir = mkdtempSync(join(tmpdir(), 'iaadn-test-'));
+    const persistence = new PersistenceStore(join(dir, 'test.db'));
+    return (async () => {
+      const api = await startApi({ persistence });
+      try {
+        await fn(api, persistence);
+      } finally {
+        api.stop();
+        persistence.close();
+        rmSync(dir, { recursive: true, force: true });
+      }
+    })();
+  }
+
+  it('records a chat reply as an unrated interaction and returns its id', () => withApiAndStore(async (api, persistence) => {
+    const res = await call(api, {
+      method: 'POST', path: '/api/chat', headers: { ...auth, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message: 'What is 15 + 27?' }),
+    });
+    assert.equal(res.status, 200);
+    const id = res.json.metadata.interactionId;
+    assert.equal(typeof id, 'number');
+
+    // Not yet rated -> not part of the exportable dataset until someone rates it
+    assert.equal(persistence.exportDataset({ minRating: -1 }).length, 0);
+    persistence.rateInteraction(id, 1);
+    const dataset = persistence.exportDataset({ minRating: -1 });
+    assert.equal(dataset.length, 1);
+    assert.equal(dataset[0].prompt, 'What is 15 + 27?');
+  }));
+
+  it('rates an interaction and rejects an invalid rating value', () => withApiAndStore(async (api, persistence) => {
+    const id = persistence.recordInteraction({ query: 'q', response: 'a' });
+
+    const bad = await call(api, {
+      method: 'POST', path: `/api/interactions/${id}/rate`, headers: { ...auth, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ rating: 5 }),
+    });
+    assert.equal(bad.status, 400);
+
+    const ok = await call(api, {
+      method: 'POST', path: `/api/interactions/${id}/rate`, headers: { ...auth, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ rating: 1 }),
+    });
+    assert.equal(ok.status, 200);
+    assert.deepEqual(ok.json, { id, rating: 1 });
+
+    const missing = await call(api, {
+      method: 'POST', path: `/api/interactions/999999/rate`, headers: { ...auth, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ rating: 1 }),
+    });
+    assert.equal(missing.status, 404);
+  }));
+
+  it('rating requires a token, same as every other /api/* route', () => withApiAndStore(async (api, persistence) => {
+    const id = persistence.recordInteraction({ query: 'q', response: 'a' });
+    const res = await call(api, {
+      method: 'POST', path: `/api/interactions/${id}/rate`, headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ rating: 1 }),
+    });
+    assert.equal(res.status, 401);
+  }));
+
+  it('answers a repeated, well-rated question from memory instead of calling the model again', () => withApiAndStore(async (api, persistence) => {
+    const first = await call(api, {
+      method: 'POST', path: '/api/chat', headers: { ...auth, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message: 'What is 15 + 27?' }),
+    });
+    const id = first.json.metadata.interactionId;
+    persistence.rateInteraction(id, 1);
+
+    const second = await call(api, {
+      method: 'POST', path: '/api/chat', headers: { ...auth, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message: 'What is 15 + 27?' }),
+    });
+    assert.equal(second.status, 200);
+    assert.equal(second.json.response, first.json.response);
+    assert.equal(second.json.metadata.mode, 'memory');
+  }));
 });
