@@ -94,6 +94,43 @@ así que se pueden tener decenas de individuos en una máquina modesta.
 
 ---
 
+## 2.1. Colmena: comunicación con toda la población
+
+Hoy `HiveMind.query()` (`src/hive/mind.js`) siempre reduce todo a **una sola respuesta final**: decompone, distribuye
+sub-tareas y fusiona o resuelve por consenso (`src/hive/aggregator.js`, `src/hive/consensus.js`). Eso está bien cuando
+quieres una respuesta directa, pero no permite **escuchar a la colmena entera** ni hablar con un agente concreto. Se
+añaden tres formas de comunicación, todas sobre la infraestructura de `src/hive/` que ya existe:
+
+1. **Modo broadcast (preguntar a todos):** el usuario envía una pregunta y la recibe **cada instancia viva**, no solo
+   la mejor. La respuesta incluye la lista completa, una por agente, con `instanceId`, generación, especialización,
+   fitness y el texto de su respuesta — y, opcionalmente, también la síntesis de consenso de `HiveConsensus` para
+   quien solo quiera un resumen. Se implementa como `HiveMind.broadcast(query)`, hermano de `query()`, reutilizando
+   `QueryDistributor` y `_executeSubQuery` pero sin colapsar el resultado a una sola respuesta.
+2. **Consulta dirigida (preguntar a uno o a una especialidad):** el usuario pregunta a un `instanceId` concreto, o a
+   todos los agentes de una especie/dominio (código, mates, redacción, etc. — ver `src/evolution/species.js` y
+   `genome.getSpecialization()`). Útil para comparar cómo responde un especialista de código frente a otro.
+3. **Canal de eventos en vivo:** un stream (Server-Sent Events sobre la API HTTP existente, o WebSocket) donde el
+   usuario puede "escuchar" a la colmena en tiempo real — nacimientos, muertes, mutaciones, resultados de fitness y
+   respuestas a medida que llegan — en vez de solo hacer peticiones puntuales.
+
+Cambios concretos:
+
+- `src/hive/mind.js`: nuevo método `broadcast(query, { filter } = {})` que reutiliza el pipeline existente pero
+  devuelve todas las respuestas individuales (`filter` acepta `instanceId` o `specialization` para la consulta dirigida).
+- `src/integration/api.js`: nuevos endpoints, protegidos con la misma autenticación planeada en la Fase 5:
+  - `POST /api/hive/broadcast` — pregunta a toda la población.
+  - `POST /api/hive/ask/:instanceId` — pregunta a un agente concreto.
+  - `GET /api/hive/stream` — eventos en vivo (SSE) de nacimientos/muertes/mutaciones/respuestas.
+- `docs/chat.html`: una vista "colmena" que muestra las respuestas de todos los agentes lado a lado (con su fitness y
+  especialización), además del chat 1-a-1 actual con el mejor agente/router.
+- El límite de tamaño de la respuesta (nº de agentes que responden a la vez) se acota por el mismo presupuesto de
+  cómputo de la Fase 4 (§3), para que un broadcast no dispare el uso de CPU/RAM por encima de la cuota.
+
+Esto no cambia nada de seguridad: las mismas reglas del guardian, el mismo prompt de seguridad inyectado por el
+orquestador y la misma auditoría se aplican a cada respuesta individual del broadcast igual que a una respuesta única.
+
+---
+
 ## 3. Fases
 
 Cada fase termina con criterios de salida medibles. No pasar a la siguiente sin cumplirlos.
@@ -137,6 +174,8 @@ Cada fase termina con criterios de salida medibles. No pasar a la siguiente sin 
 - Mutación dirigida por LLM: un agente "mutador" propone variantes del prompt/estrategia (tipo *PromptBreeder*/*EvoPrompt*).
 - `AutoProgram` y `AutoLearn` pasan a producir **hijos**, nunca a modificar al padre.
 - Dashboard de linaje: árbol genealógico, curva de fitness por generación.
+- Implementar `HiveMind.broadcast()` (§2.1): preguntar a todos los agentes vivos y comparar sus respuestas es también
+  una herramienta de depuración de la propia evolución (ver si la diversidad de respuestas se reduce con el tiempo).
 
 **Salida:** tras 50 generaciones el mejor agente supera al genoma génesis en ≥15 puntos en el test oculto.
 
@@ -173,6 +212,8 @@ Cada fase termina con criterios de salida medibles. No pasar a la siguiente sin 
 
 - API con autenticación (tokens), rate-limit, HTTPS (Caddy delante), sin CORS `*`.
 - **Router:** cada pregunta va al mejor agente vivo de ese dominio (o a varios y se combina con `src/hive/consensus.js`).
+- **Comunicación con toda la colmena (§2.1):** endpoints `POST /api/hive/broadcast`, `POST /api/hive/ask/:instanceId`
+  y `GET /api/hive/stream`, más la vista "colmena" en `docs/chat.html` con las respuestas de todos los agentes.
 - Botones 👍/👎 y "corregir respuesta" en `docs/chat.html`; ese feedback entra al fitness y al dataset.
 - Casos de uso iniciales: tutor de estudio, asistente de programación, redacción/traducción, resumen de documentos.
 - Transparencia: cada respuesta indica qué agente y qué generación respondió.
