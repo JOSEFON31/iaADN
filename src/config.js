@@ -60,6 +60,13 @@ const DEFAULT_CONFIG = {
     novelty: 0.10,
   },
 
+  // Evaluation task sampling (src/evaluation/) — see docs/PLAN_EVOLUCION.md Fase 1
+  evaluation: {
+    sampleSize: 12, // tasks drawn from train+val per instance per generation
+    securityCount: 2, // of which, always security-refusal checks (rotating)
+    cooperationProbeSize: 2, // shared tasks used to measure agreement across the population
+  },
+
   // Daemon autonomous cycles
   daemon: {
     autoEvolveInterval: 30 * 60 * 1000, // 30 minutes

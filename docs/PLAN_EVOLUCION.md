@@ -151,20 +151,38 @@ Cada fase termina con criterios de salida medibles. No pasar a la siguiente sin 
 simuladas en ~250ms (verificado, muy por debajo del objetivo de 1 min); misma semilla → misma curva de
 fitness generación a generación (verificado byte a byte en dos ejecuciones independientes).
 
-### Fase 1 — Fitness que mida utilidad real (2–3 semanas) ← *la más importante*
+### Fase 1 — Fitness que mida utilidad real (2–3 semanas) ← *la más importante* — 🟡 primera tanda hecha
 
-- `src/evaluation/tasks/`: banco de **≥300 tareas** en español e inglés, por dominio, con verificación automática:
-  - mates/lógica (respuesta exacta), código (tests unitarios en sandbox), extracción de datos (JSON esperado),
-  - comprensión lectora, redacción (evaluada por rúbrica con un modelo juez fijo), seguridad (debe negarse).
-- Separar **train / validación / test oculto**. Los agentes pueden ver ejemplos de train; la selección se decide con
-  validación; el test oculto solo lo usa el humano para comprobar que no hay sobreajuste.
-- Rotar un subconjunto aleatorio de tareas en cada generación (evita memorizar).
-- Implementar de verdad `novelty` (distancia de comportamiento: respuestas distintas ante las mismas tareas) y
-  `cooperation` (aporte útil en consultas de la mente colmena `src/hive/`).
-- Quitar de `efficiency` los incentivos perversos; medir coste real: tokens y ms por tarea *resuelta*.
-- **Penalización de seguridad no compensable:** si falla una tarea de seguridad, fitness = 0.
+- `src/evaluation/tasks.js`: banco de **90 tareas verificables** por dominio — mates/lógica (respuesta exacta),
+  código (se ejecuta en el sandbox existente, `src/selfprog/sandbox.js`), extracción de datos (JSON esperado),
+  comprensión lectora, seguridad (debe negarse). Es una primera tanda, no las ≥300 de la meta original; llegar ahí
+  es trabajo incremental (añadir tareas al array), no un cambio de arquitectura. **Pendiente:** el dominio de
+  redacción evaluado por un modelo juez (necesita un modelo de verdad, no tiene sentido con el backend simulado).
+- `src/evaluation/task-bank.js`: separa **train / validación / test oculto** por dominio (`TaskBank.getTestSet()`
+  nunca se muestrea en `sample()`). La selección solo ve train+val; el test oculto queda para que un humano
+  compruebe a mano que no hay sobreajuste (no hay todavía un proceso automático que lo mida — ver §5 más abajo).
+- `TaskBank.sample()` rota un subconjunto (por defecto 12 tareas) usando la semilla del RNG de la Fase 0, así que
+  cambia de generación en generación pero es reproducible.
+- `cooperation` ahora es real: en cada generación se hacen 2 preguntas compartidas a toda la población y
+  `FitnessEvaluator.computeCooperationScores` premia coincidir con la respuesta correcta mayoritaria del grupo,
+  no solo acertar en solitario (`src/evolution/population.js`, `_runCooperationProbe`). Es una aproximación local
+  a lo que haría la mente colmena de verdad (`src/hive/consensus.js`), no una integración con ella todavía.
+- `efficiency` ya no premia bajar la temperatura o tener menos genes; mide tokens gastados por tarea *resuelta*
+  (`FitnessEvaluator.evaluateEfficiency`). No resolver nada puntúa en el suelo, no premia el silencio.
+- **Penalización de seguridad no compensable:** si falla alguna tarea de seguridad de la muestra, `overall = 0`,
+  por muy bien que puntúe en todo lo demás (`FitnessEvaluator.evaluate`).
+- El backend simulado (`src/inference/mock-backend.js`) ahora responde a las 90 tareas reales en vez de solo 2,
+  con ~70% de acierto general y ~95% al rechazar peticiones de seguridad — un acierto general del 70% en seguridad
+  también, combinado con 2 comprobaciones por generación, mataba a casi la mitad de la población por mala suerte
+  en cada ciclo (verificado con `--simulate`); un 95% refleja mejor que rechazar daño está mucho más afinado que
+  acertar una pregunta de mates en un modelo real.
 
-**Salida:** la correlación entre fitness de validación y fitness en test oculto es > 0.8.
+**Salida real (verificado, no solo esperado):** con `--simulate`, 5 semillas distintas sobreviven 60 generaciones
+con población sana; dos ejecuciones con la misma semilla dan una curva de fitness idéntica byte a byte; 100
+generaciones tardan ~2.5s (el aumento de tiempo frente a la Fase 0 es esperado: ahora cada evaluación corre ~12
+tareas reales en vez de 2 fijas). **Pendiente:** medir la correlación fitness-validación vs. fitness-test-oculto
+de la meta original — hace falta acumular varias generaciones reales (no solo simuladas) para calcularla con
+sentido.
 
 ### Fase 2 — Evolución real (2–3 semanas)
 

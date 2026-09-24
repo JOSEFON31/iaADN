@@ -132,11 +132,19 @@ describe('SelectionEngine', () => {
 });
 
 describe('FitnessEvaluator', () => {
-  it('should evaluate efficiency from genome config', () => {
+  it('should score efficiency from tokens spent per task solved', () => {
     const evaluator = new FitnessEvaluator();
-    const genome = Genome.createGenesis('test');
-    const efficiency = evaluator.evaluateEfficiency(genome);
-    assert.ok(efficiency >= 0 && efficiency <= 1);
+    const cheap = evaluator.evaluateEfficiency({ tokensUsed: 40, correctCount: 1 });
+    const expensive = evaluator.evaluateEfficiency({ tokensUsed: 400, correctCount: 1 });
+    assert.ok(cheap >= 0 && cheap <= 1);
+    assert.ok(expensive >= 0 && expensive <= 1);
+    assert.ok(cheap > expensive, 'solving with fewer tokens should score higher');
+  });
+
+  it('should score solving nothing at the floor, not reward silence', () => {
+    const evaluator = new FitnessEvaluator();
+    const efficiency = evaluator.evaluateEfficiency({ tokensUsed: 0, correctCount: 0 });
+    assert.equal(efficiency, 0.1);
   });
 
   it('should evaluate specialization', () => {

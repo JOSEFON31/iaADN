@@ -75,25 +75,24 @@ export class Population {
   async _doEvaluateAll(inferenceEngine) {
     const living = this.getLiving();
 
+    // Cooperation is measured once across the whole generation (it's about
+    // agreement between instances, not a single instance in isolation) —
+    // see FitnessEvaluator.computeCooperationScores.
+    const probeResults = await this._runCooperationProbe(inferenceEngine, living);
+    const cooperationScores = FitnessEvaluator.computeCooperationScores(probeResults);
+
     for (const inst of living) {
       try {
         const result = await this.fitnessEvaluator.evaluate(inst.genome, inferenceEngine);
 
-        // Compute novelty score
         const allGenomes = living.map(i => i.genome);
         result.dimensions.novelty = FitnessEvaluator.computeNoveltyScore(inst.genome, allGenomes);
+        result.dimensions.cooperation = cooperationScores.get(inst.genome.instanceId) ?? 0.5;
 
-        // Recalculate overall with novelty
+        // Recalculate overall now that novelty/cooperation are filled in —
+        // a security refusal failure still zeroes it, non-compensable.
         const weights = getConfig().fitness;
-        result.overall =
-          weights.accuracy * result.dimensions.accuracy +
-          weights.speed * result.dimensions.speed +
-          weights.efficiency * result.dimensions.efficiency +
-          weights.specialization * result.dimensions.specialization +
-          weights.cooperation * result.dimensions.cooperation +
-          weights.novelty * result.dimensions.novelty;
-
-        result.overall = Math.max(0, Math.min(1, result.overall));
+        result.overall = result.securityFailed ? 0 : FitnessEvaluator.composite(result.dimensions, weights);
 
         inst.fitness = result.overall;
         this.fitnessScores.set(inst.genome.instanceId, result.overall);
@@ -106,6 +105,39 @@ export class Population {
         this.fitnessScores.set(inst.genome.instanceId, 0.1);
       }
     }
+  }
+
+  // Ask every living instance the same small set of tasks and record whether
+  // each one got it right — the raw material for the cooperation dimension.
+  async _runCooperationProbe(inferenceEngine, living) {
+    if (!inferenceEngine?.ready || living.length === 0) return [];
+
+    const config = getConfig().evaluation;
+    const probeTasks = this.fitnessEvaluator.taskBank.sample({
+      rng, count: config.cooperationProbeSize, securityCount: 0,
+    });
+
+    const probeResults = [];
+    for (const task of probeTasks) {
+      const responses = [];
+      for (const inst of living) {
+        try {
+          const result = await inferenceEngine.complete(
+            [{ role: 'user', content: task.prompt }],
+            { systemPrompt: inst.genome.getSystemPrompt(), maxTokens: 200, ...inst.genome.getInferenceConfig() }
+          );
+          responses.push({
+            instanceId: inst.genome.instanceId,
+            content: result.content,
+            correct: !!task.verify(result.content, { sandbox: this.fitnessEvaluator.sandbox }),
+          });
+        } catch {
+          responses.push({ instanceId: inst.genome.instanceId, content: '', correct: false });
+        }
+      }
+      probeResults.push({ task, responses });
+    }
+    return probeResults;
   }
 
   // Run one complete generation cycle (autonomous — no human needed)

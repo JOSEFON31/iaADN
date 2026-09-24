@@ -18,6 +18,7 @@ import { IOTAIBridge } from './integration/iotai-bridge.js';
 import { Population } from './evolution/population.js';
 import { PersistenceStore } from './persistence/store.js';
 import { Lifecycle } from './daemon/lifecycle.js';
+import { Recovery } from './daemon/recovery.js';
 import { HiveMind } from './hive/mind.js';
 import { API } from './integration/api.js';
 import { initRng, getSeed, rng } from './util/rng.js';
@@ -286,7 +287,27 @@ class IaADN {
     const startedAt = Date.now();
     const history = [];
 
+    // The real daemon runs Recovery every 30s to top up a population that
+    // dropped to 0-1 instances (src/daemon/lifecycle.js); a fast simulation
+    // has no such background process, so without this a run that gets
+    // unlucky early would report itself "done" while stuck at 1 instance
+    // for every remaining generation.
+    const recovery = new Recovery({
+      population: this.populationManager,
+      guardian: this.guardian,
+      lineage: this.lineage,
+      auditLog: this.auditLog,
+      nodeId: this.nodeId,
+    });
+
     for (let i = 0; i < generations; i++) {
+      if (this.populationManager.getLiving().length < 2) {
+        const recovered = await recovery.run();
+        if (recovered.action !== 'none') {
+          console.log(`[Simulate] Generation ${i + 1}: population recovery (${recovered.action})`);
+        }
+      }
+
       const result = await this.populationManager.runGeneration(this.inferenceEngine);
       if (result.skipped) {
         console.log(`[Simulate] Generation ${i + 1} skipped: ${result.reason}`);
