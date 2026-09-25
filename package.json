@@ -6,8 +6,9 @@
   "type": "module",
   "scripts": {
     "start": "node src/index.js",
-    "test": "node --test tests/**/*.test.js",
-    "daemon": "node src/index.js --daemon"
+    "test": "node --test",
+    "daemon": "node src/index.js --daemon",
+    "simulate": "node src/index.js --simulate=100"
   },
   "keywords": [
     "decentralized-ai",
@@ -18,11 +19,12 @@
     "p2p"
   ],
   "dependencies": {
-    "node-llama-cpp": "^3.6.0",
     "acorn": "^8.14.0",
-    "acorn-walk": "^8.3.4"
+    "acorn-walk": "^8.3.4",
+    "better-sqlite3": "^13.0.3",
+    "node-llama-cpp": "^3.6.0"
   },
   "engines": {
-    "node": ">=20.0.0"
+    "node": ">=22.0.0"
   }
 }

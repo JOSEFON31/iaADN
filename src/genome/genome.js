@@ -3,7 +3,7 @@
 
 import { randomBytes, createHash } from 'crypto';
 import { Chromosome } from './chromosome.js';
-import { GENE_TYPES } from './gene.js';
+import { GENE_TYPES, REASONING_MODES } from './gene.js';
 
 export class Genome {
   constructor({
@@ -107,6 +107,20 @@ export class Genome {
   getSpecialization() {
     const routingGene = this.getGene('specialization');
     return routingGene ? routingGene.value : { general: 1.0 };
+  }
+
+  // Get the reasoning strategy ('direct' | 'step_by_step' | 'self_critique')
+  getReasoningMode() {
+    const gene = this.getGene('reasoningMode');
+    return gene ? gene.value : 'direct';
+  }
+
+  // Apply the reasoning-strategy instruction (if any) ahead of a task
+  // prompt — the one place this gene actually changes what gets sent to the
+  // model, instead of just sitting in the genome unused.
+  applyReasoningMode(prompt) {
+    const instruction = REASONING_MODES[this.getReasoningMode()] || '';
+    return instruction + prompt;
   }
 
   // Compute a fingerprint hash of the entire genome

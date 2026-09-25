@@ -11,6 +11,17 @@ export const GENE_TYPES = {
   ROUTING: 'routing',       // Specialization weights
   PERSONALITY: 'personality', // Behavioral traits
   MODEL: 'model',           // Base model reference
+  STRATEGY: 'strategy',     // How the instance approaches a task (reasoning mode)
+};
+
+// Discrete choices for the reasoningMode strategy gene, and the instruction
+// each one adds to a task prompt — see FitnessEvaluator.runTasks, which is
+// what makes this gene have a real, measurable effect instead of being
+// decorative.
+export const REASONING_MODES = {
+  direct: '',
+  step_by_step: 'Think step by step before giving your final answer.\n\n',
+  self_critique: 'Draft an answer, briefly check it for mistakes, then give your final answer.\n\n',
 };
 
 // How much each gene type can change per mutation
@@ -22,6 +33,7 @@ const MUTABILITY = {
   [GENE_TYPES.ROUTING]: 0.8,
   [GENE_TYPES.PERSONALITY]: 0.5,
   [GENE_TYPES.MODEL]: 0.05,
+  [GENE_TYPES.STRATEGY]: 0.6,
 };
 
 export class Gene {
@@ -117,6 +129,13 @@ export class Gene {
         type: GENE_TYPES.PERSONALITY,
         name: 'traits',
         value: { verbosity: 0.5, creativity: 0.5, precision: 0.5, confidence: 0.5 },
+      }),
+
+      // Reasoning strategy — see REASONING_MODES above
+      new Gene({
+        type: GENE_TYPES.STRATEGY,
+        name: 'reasoningMode',
+        value: 'direct',
       }),
     ];
   }

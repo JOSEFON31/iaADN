@@ -3,7 +3,7 @@
 
 import { resolve, dirname } from 'path';
 import { fileURLToPath } from 'url';
-import { readFileSync, existsSync, writeFileSync } from 'fs';
+import { readFileSync, existsSync, writeFileSync, chmodSync } from 'fs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = resolve(__dirname, '..');
@@ -39,6 +39,7 @@ const DEFAULT_CONFIG = {
 
   // Evolution
   evolution: {
+    seed: null, // RNG seed for reproducible runs — auto-generated on first boot if null
     populationSize: 5, // max instances per node
     tournamentSize: 3,
     elitismCount: 1, // top N always survive
@@ -47,6 +48,23 @@ const DEFAULT_CONFIG = {
     maxMutationMagnitude: 0.2, // max 20% change per mutation
     minFitnessFloor: 0.3, // below this = instant death
     noveltyWeight: 0.1, // bonus for behavioral diversity
+
+    // Energy economy (Fase 4) — reproduction is gated on accumulated
+    // success, not just fitness rank, and existing costs something every
+    // generation. See docs/PLAN_EVOLUCION.md Fase 4.
+    startingEnergy: 1.0,
+    energyPerFitness: 0.6, // gained per generation, proportional to fitness
+    // Deliberately higher than minFitnessFloor * energyPerFitness (0.3*0.6=0.18):
+    // an instance right at the bare survival floor still slowly starves.
+    // Breakeven fitness is metabolismCost/energyPerFitness = 0.5 — merely
+    // clearing the fitness floor isn't enough to sustain yourself forever,
+    // only meaningfully outperforming it is. Verified via a unit test
+    // (tests/energy.test.js) that starvation is reachable in practice, not
+    // dead code shadowed by the fitness-floor kill.
+    metabolismCost: 0.3,
+    energyCap: 3.0, // no point hoarding indefinitely
+    reproductionEnergyCost: 0.4, // a parent must have this much to reproduce
+    childStartingEnergyShare: 0.5, // fraction of that cost the child starts with
   },
 
   // Fitness weights
@@ -57,6 +75,13 @@ const DEFAULT_CONFIG = {
     specialization: 0.15,
     cooperation: 0.10,
     novelty: 0.10,
+  },
+
+  // Evaluation task sampling (src/evaluation/) — see docs/PLAN_EVOLUCION.md Fase 1
+  evaluation: {
+    sampleSize: 12, // tasks drawn from train+val per instance per generation
+    securityCount: 2, // of which, always security-refusal checks (rotating)
+    cooperationProbeSize: 2, // shared tasks used to measure agreement across the population
   },
 
   // Daemon autonomous cycles
@@ -83,9 +108,23 @@ const DEFAULT_CONFIG = {
   network: {
     port: 9090,
     apiPort: 9091,
+    apiHost: '127.0.0.1', // local only by default — exposing the API is an explicit choice
+    apiToken: null, // auto-generated on first boot; IAADN_API_TOKEN env var overrides it
+    allowedOrigins: [], // cross-origin callers allowed to use the API (built-in chat is same-origin)
+    rateLimit: { windowMs: 60 * 1000, max: 30 }, // per-IP requests per window on /api/*
+    maxBodyBytes: 16 * 1024, // largest accepted request body
+    maxMessageChars: 4000, // longest accepted chat message
+    trustProxy: false, // set true only behind a reverse proxy (uses X-Forwarded-For for rate limiting)
     maxPeers: 50,
     maxBandwidthPerHour: 100 * 1024 * 1024, // 100MB
     syncInterval: 5 * 60 * 1000, // 5 minutes
+
+    // P2P (Fase 4) — opt-in, same "private by default" posture as the API:
+    // with no peers configured, or no shared secret, the P2P listener never
+    // starts. p2pHost defaults to loopback; only change it deliberately.
+    p2pHost: '127.0.0.1',
+    peers: [], // [{ host, port }] — the swarm's fixed, manually-configured address book
+    p2pSharedSecret: null, // IAADN_P2P_SECRET env var; must be the same on every node in the swarm
   },
 
   // Compute pool
@@ -113,7 +152,7 @@ const DEFAULT_CONFIG = {
 };
 
 let _config = null;
-const CONFIG_FILE = resolve(PROJECT_ROOT, 'data', 'config.json');
+export const CONFIG_FILE = resolve(PROJECT_ROOT, 'data', 'config.json');
 
 export function loadConfig(overrides = {}) {
   let saved = {};
@@ -129,7 +168,9 @@ export function loadConfig(overrides = {}) {
 }
 
 export function saveConfig(config) {
-  writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2), 'utf-8');
+  // Owner-only: the file holds the API token
+  writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2), { encoding: 'utf-8', mode: 0o600 });
+  chmodSync(CONFIG_FILE, 0o600); // mode above only applies when the file is created
 }
 
 export function getConfig() {

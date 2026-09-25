@@ -3,22 +3,32 @@
 // Entry point: boots the system, initializes all components
 // After boot, the daemon runs 24/7 autonomously — no human needed
 
-import { loadConfig, getConfig, saveConfig } from './config.js';
+import { loadConfig, getConfig, saveConfig, CONFIG_FILE } from './config.js';
 import { Genome } from './genome/genome.js';
 import { GenomeCodec } from './genome/codec.js';
 import { Lineage } from './genome/lineage.js';
 import { InferenceEngine } from './inference/engine.js';
 import { LlamaBackend } from './inference/llama-backend.js';
+import { MockBackend } from './inference/mock-backend.js';
 import { ModelRegistry } from './inference/model-registry.js';
 import { SafetyGuardian } from './safety/guardian.js';
 import { AuditLog } from './safety/audit-log.js';
 import { KillSwitch } from './safety/kill-switch.js';
 import { IOTAIBridge } from './integration/iotai-bridge.js';
 import { Population } from './evolution/population.js';
+import { PersistenceStore } from './persistence/store.js';
 import { Lifecycle } from './daemon/lifecycle.js';
+import { Recovery } from './daemon/recovery.js';
 import { HiveMind } from './hive/mind.js';
 import { API } from './integration/api.js';
+import { initRng, getSeed, rng } from './util/rng.js';
+import { IaADNNode } from './network/node.js';
+import { GenomeSync } from './network/sync.js';
+import { loadOrCreateIdentity } from './network/identity.js';
+import { validateSafetyPrompt } from './safety/rules.js';
 import { randomBytes } from 'crypto';
+import { mkdirSync, writeFileSync } from 'fs';
+import { resolve, dirname } from 'path';
 
 class IaADN {
   constructor() {
@@ -31,18 +41,24 @@ class IaADN {
     this.modelRegistry = null;
     this.inferenceEngine = null;
     this.iotaiBridge = null;
-    this.population = new Map(); // instanceId -> { genome, fitness, engine }
+    this.persistenceStore = null;
+    this.identity = null; // ed25519 keypair — signs genomes this node creates (Fase 4)
+    this.p2pNode = null; // IaADNNode — null unless P2P is configured (Fase 4)
+    this.genomeSync = null;
+    this.populationManager = null; // single source of truth for the population — see docs/PLAN_EVOLUCION.md §0
     this.hiveMind = null;
     this.api = null;
     this.running = false;
   }
 
-  async boot() {
+  // options.simulate: run in fast simulation mode (mock backend, no daemon timers)
+  // options.seed: override the evolution RNG seed for this boot (reproducibility/debugging)
+  async boot({ simulate = false, seed = null } = {}) {
     console.log('=== iaADN - Decentralized Self-Evolving AI ===');
     console.log('Initializing...\n');
 
     // 1. Load configuration
-    this.config = loadConfig();
+    this.config = loadConfig(seed ? { evolution: { seed } } : {});
     this.nodeId = this.config.nodeId || ('node_' + randomBytes(8).toString('hex'));
     if (!this.config.nodeId) {
       this.config.nodeId = this.nodeId;
@@ -50,11 +66,30 @@ class IaADN {
     }
     console.log(`[Boot] Node ID: ${this.nodeId}`);
 
+    // 1a. API token — generated once and kept in data/config.json (owner-only
+    // file). Never logged; read it deliberately with `--show-token`.
+    this.apiToken = resolveApiToken(this.config);
+
+    // 1b. Node identity — an ed25519 keypair signing every genome this node
+    // creates, so a peer can tell it really came from here (Fase 4). The
+    // private key file is owner-only and never leaves this machine.
+    this.identity = loadOrCreateIdentity(resolve(this.config.paths.data, 'node.key'));
+
+    // 1b. Seed the shared RNG — every mutation/crossover/selection decision
+    // from here on is reproducible from this one value.
+    const usedSeed = initRng(this.config.evolution.seed);
+    if (!this.config.evolution.seed) {
+      this.config.evolution.seed = usedSeed;
+      saveConfig(this.config);
+    }
+    console.log(`[Boot] RNG seed: ${usedSeed}`);
+
     // 2. Initialize safety systems FIRST (before anything else)
     this.auditLog = new AuditLog();
     this.killSwitch = new KillSwitch(this.auditLog);
     this.guardian = new SafetyGuardian(this.auditLog);
     console.log('[Boot] Safety systems initialized');
+    this.auditLog.log('rng_seed', { seed: usedSeed });
 
     // Wire up kill switch
     this.killSwitch.on('activated', ({ reason }) => {
@@ -62,18 +97,24 @@ class IaADN {
       this.shutdown();
     });
 
-    // 3. Initialize lineage tracking
-    this.lineage = new Lineage();
-    console.log('[Boot] Lineage tracking initialized');
+    // 3. Initialize persistence — SQLite store that survives restarts
+    this.persistenceStore = new PersistenceStore();
+    console.log('[Boot] Persistence store initialized');
 
-    // 4. Initialize model registry
+    // 4. Initialize lineage tracking (restored from persistence if available)
+    const savedLineage = this.persistenceStore.loadLineageEntries();
+    this.lineage = savedLineage.length > 0 ? Lineage.fromJSON(savedLineage) : new Lineage();
+    this.lineage.persistence = this.persistenceStore;
+    console.log(`[Boot] Lineage tracking initialized (${savedLineage.length} known instance(s))`);
+
+    // 5. Initialize model registry
     this.modelRegistry = new ModelRegistry();
     const models = this.modelRegistry.listModels();
     console.log(`[Boot] Model registry: ${models.length} model(s) available`);
 
-    // 5. Initialize inference engine
+    // 6. Initialize inference engine
     const bestModel = this.modelRegistry.getBestModel();
-    if (bestModel) {
+    if (bestModel && !simulate) {
       const backend = new LlamaBackend(bestModel.path);
       this.inferenceEngine = new InferenceEngine(backend);
       try {
@@ -81,61 +122,118 @@ class IaADN {
         console.log(`[Boot] Inference engine: loaded ${bestModel.name} (${bestModel.sizeMB}MB)`);
       } catch (err) {
         console.warn(`[Boot] Inference engine failed to load: ${err.message}`);
-        console.log('[Boot] Continuing in mock mode');
+        this.inferenceEngine = null;
       }
-    } else {
-      console.log('[Boot] No models found — inference will use mock mode');
+    }
+    if (!this.inferenceEngine) {
+      // No usable real model (or explicitly running a fast simulation) — use
+      // the mock backend so fitness evaluation and the hive mind always have
+      // a working, instant inference engine instead of silently having none.
+      this.inferenceEngine = new InferenceEngine(new MockBackend());
+      await this.inferenceEngine.initialize();
+      console.log(`[Boot] Inference engine: mock backend (${simulate ? 'simulation mode' : 'no model file found'})`);
     }
 
-    // 6. Connect to IOTAI
+    // 7. Connect to IOTAI
     this.iotaiBridge = new IOTAIBridge();
     const iotaiConnected = await this.iotaiBridge.connect();
     console.log(`[Boot] IOTAI bridge: ${iotaiConnected ? 'connected' : 'standalone mode'}`);
 
-    // 7. Initialize population manager
+    // 8. Initialize population manager (restored from persistence if available)
     this.populationManager = new Population({
       guardian: this.guardian,
       lineage: this.lineage,
       auditLog: this.auditLog,
+      persistence: this.persistenceStore,
     });
 
-    // 8. Initialize hive mind
+    const restored = this.persistenceStore.loadPopulation();
+    for (const { genome, fitness } of restored) {
+      this.populationManager.addInstance(genome, fitness);
+      this.guardian.resourceLimits.registerInstance();
+    }
+    this.populationManager.generation = this.persistenceStore.getLastGeneration();
+
+    // 8b. P2P networking — opt-in (see docs/PLAN_EVOLUCION.md Fase 4). Only
+    // starts a listener when peers + a shared secret are actually
+    // configured; otherwise this node stays standalone, same as before.
+    const net = this.config.network;
+    const p2pSecret = process.env.IAADN_P2P_SECRET || net.p2pSharedSecret;
+    this.p2pNode = new IaADNNode({
+      nodeId: this.nodeId,
+      identity: this.identity,
+      host: net.p2pHost,
+      port: net.port,
+      peerAddresses: net.peers,
+      sharedSecret: p2pSecret,
+    });
+    if (!simulate) await this.p2pNode.start();
+
+    this.genomeSync = new GenomeSync({
+      node: this.p2pNode,
+      population: this.populationManager,
+      lineage: this.lineage,
+    });
+    this.lineage.network = this.genomeSync;
+
+    // Adopt a genome born on a peer, once its signature and basic safety
+    // checks pass — this is the actual cross-node replication (an "island"
+    // migrating in). Never re-announced (announce: false) — otherwise it'd
+    // bounce forever between nodes that all have each other as peers.
+    this.p2pNode.onMessage('birth_announcement', (msg) => this._handleRemoteBirth(msg));
+
+    // 9. Initialize hive mind
     this.hiveMind = new HiveMind({
       population: this.populationManager,
       inferenceEngine: this.inferenceEngine,
-      node: null, // P2P node — added when network layer connects
+      node: this.p2pNode,
     });
     console.log('[Boot] Hive mind initialized');
 
-    // 9. Start API server
-    this.api = new API({
-      hiveMind: this.hiveMind,
-      population: this.populationManager,
-      inferenceEngine: this.inferenceEngine,
-      lineage: this.lineage,
-      guardian: this.guardian,
-      killSwitch: this.killSwitch,
-      nodeId: this.nodeId,
-      port: this.config.network.apiPort,
-    });
-    this.api.start();
-
-    // 10. Create genesis population (if no existing instances)
-    if (this.population.size === 0) {
-      await this.createGenesisPopulation();
+    // 10. Start API server (not needed for a fast simulation run)
+    if (!simulate) {
+      this.api = new API({
+        hiveMind: this.hiveMind,
+        population: this.populationManager,
+        inferenceEngine: this.inferenceEngine,
+        lineage: this.lineage,
+        guardian: this.guardian,
+        killSwitch: this.killSwitch,
+        persistence: this.persistenceStore,
+        p2pNode: this.p2pNode,
+        nodeId: this.nodeId,
+        port: net.apiPort,
+        host: net.apiHost,
+        token: this.apiToken,
+        allowedOrigins: net.allowedOrigins,
+        rateLimit: net.rateLimit,
+        maxBodyBytes: net.maxBodyBytes,
+        maxMessageChars: net.maxMessageChars,
+        trustProxy: net.trustProxy,
+      });
+      await this.api.start();
+      console.log(`[Boot] API token: stored in ${CONFIG_FILE} (print it with --show-token)`);
     }
 
-    // 11. Log boot event
+    // 11. Create genesis population, unless one was restored from persistence
+    if (restored.length === 0) {
+      await this.createGenesisPopulation();
+    } else {
+      console.log(`[Boot] Restored ${restored.length} instance(s) from persistence (generation ${this.populationManager.generation})`);
+    }
+
+    // 12. Log boot event
     this.auditLog.log('system_boot', {
       nodeId: this.nodeId,
       modelsAvailable: models.length,
       iotaiConnected,
-      populationSize: this.population.size,
+      populationSize: this.populationManager.getLiving().length,
+      seed: usedSeed,
     });
 
     this.running = true;
     console.log('\n[Boot] iaADN is ready.');
-    console.log(`[Boot] Population: ${this.population.size} instance(s)`);
+    console.log(`[Boot] Population: ${this.populationManager.getLiving().length} instance(s)`);
     console.log('[Boot] System is now autonomous — no human intervention needed.\n');
 
     return this;
@@ -151,26 +249,22 @@ class IaADN {
 
       // Slightly vary each instance's config for initial diversity
       const tempGene = genome.getGene('temperature');
-      if (tempGene) tempGene.value = 0.5 + Math.random() * 0.5; // 0.5 - 1.0
+      if (tempGene) tempGene.value = 0.5 + rng.random() * 0.5; // 0.5 - 1.0
 
       const traitGene = genome.getGene('traits');
       if (traitGene) {
         traitGene.value = {
-          verbosity: 0.3 + Math.random() * 0.4,
-          creativity: 0.3 + Math.random() * 0.4,
-          precision: 0.3 + Math.random() * 0.4,
-          confidence: 0.3 + Math.random() * 0.4,
+          verbosity: 0.3 + rng.random() * 0.4,
+          creativity: 0.3 + rng.random() * 0.4,
+          precision: 0.3 + rng.random() * 0.4,
+          confidence: 0.3 + rng.random() * 0.4,
         };
       }
 
-      // Register in population
-      this.population.set(genome.instanceId, {
-        genome,
-        fitness: null,
-        alive: true,
-      });
+      // Register in the population manager (single source of truth)
+      this.populationManager.addInstance(genome);
 
-      // Record in lineage
+      // Record in lineage (this also mirrors the birth into persistence)
       this.lineage.recordBirth(genome);
 
       // Save genome to disk
@@ -191,17 +285,12 @@ class IaADN {
 
   // Get the full system status
   getStatus() {
-    const living = [];
-    for (const [id, inst] of this.population) {
-      if (inst.alive) {
-        living.push({
-          instanceId: id,
-          generation: inst.genome.generation,
-          fitness: inst.fitness,
-          hash: inst.genome.hash(),
-        });
-      }
-    }
+    const living = this.populationManager.getLiving().map(inst => ({
+      instanceId: inst.genome.instanceId,
+      generation: inst.genome.generation,
+      fitness: inst.fitness,
+      hash: inst.genome.hash(),
+    }));
 
     return {
       nodeId: this.nodeId,
@@ -211,18 +300,12 @@ class IaADN {
       resources: this.guardian.getResourceStatus(),
       killSwitch: this.killSwitch.getStatus(),
       iotaiConnected: this.iotaiBridge.isConnected(),
+      p2p: this.p2pNode?.getStatus() ?? null,
     };
   }
 
   // Start the daemon (24/7 autonomous mode)
   startDaemon() {
-    // Sync population manager with raw population map
-    for (const [id, inst] of this.population) {
-      if (inst.alive) {
-        this.populationManager.addInstance(inst.genome, inst.fitness);
-      }
-    }
-
     this.lifecycle = new Lifecycle({
       population: this.populationManager,
       inferenceEngine: this.inferenceEngine,
@@ -232,9 +315,144 @@ class IaADN {
       iotaiBridge: this.iotaiBridge,
       auditLog: this.auditLog,
       nodeId: this.nodeId,
+      genomeSync: this.p2pNode?.connected ? this.genomeSync : null,
     });
 
     this.lifecycle.start();
+  }
+
+  // A peer announced a genome it created — verify it's really theirs and
+  // safe, then adopt it into our own population if there's room. See
+  // docs/PLAN_EVOLUCION.md Fase 4.
+  _handleRemoteBirth(msg) {
+    const envelope = msg?.data?.envelope;
+    if (!envelope) return;
+
+    let genome;
+    try {
+      ({ genome } = GenomeCodec.fromTransferFormat(envelope, { requireSignature: true }));
+    } catch (err) {
+      console.warn(`[P2PNode] Rejected genome from ${msg.senderId}: ${err.message}`);
+      this.auditLog.log('p2p_genome_rejected', { senderId: msg.senderId, reason: err.message });
+      return;
+    }
+
+    if (this.populationManager.instances.has(genome.instanceId)) return; // already have it
+
+    if (!validateSafetyPrompt(genome)) {
+      console.warn(`[P2PNode] Rejected genome ${genome.instanceId}: missing safety prompt`);
+      this.auditLog.log('p2p_genome_rejected', { senderId: msg.senderId, instanceId: genome.instanceId, reason: 'missing_safety_prompt' });
+      return;
+    }
+
+    const spawnCheck = this.guardian.canSpawn();
+    if (!spawnCheck.allowed) {
+      console.log(`[P2PNode] Not adopting immigrant ${genome.instanceId}: ${spawnCheck.reason}`);
+      return;
+    }
+
+    this.populationManager.addInstance(genome);
+    this.lineage.recordBirth(genome, null, { announce: false }); // don't bounce it back to the swarm
+    this.guardian.resourceLimits.registerInstance();
+    this.auditLog.logBirth(genome);
+    this.auditLog.log('p2p_genome_adopted', { senderId: msg.senderId, instanceId: genome.instanceId });
+    console.log(`[P2PNode] Adopted immigrant genome ${genome.instanceId} from ${msg.senderId} (gen ${genome.generation})`);
+  }
+
+  // Fast simulation mode: run many generations back-to-back with no daemon
+  // timers, normally against the mock inference backend — for validating the
+  // evolutionary loop in seconds instead of hours. See docs/PLAN_EVOLUCION.md
+  // section "0. Cimientos" — "Modo simulación rápida".
+  async runSimulation(generations, { evalTest = false } = {}) {
+    console.log(`\n[Simulate] Running ${generations} generation(s) as fast as possible...`);
+    const startedAt = Date.now();
+    const history = [];
+
+    // --eval-test: score the starting (genesis) genomes against the
+    // held-out test split BEFORE evolving, so there's an honest before/after
+    // to check the Fase 2 exit criterion against (best agent should beat
+    // genesis by >=15 points on held-out test after 50 generations) — see
+    // docs/PLAN_EVOLUCION.md Fase 1/2. Nothing computed this before.
+    let genesisTestScore = null;
+    let testSet = [];
+    if (evalTest) {
+      testSet = this.populationManager.fitnessEvaluator.taskBank.getTestSet();
+      const genesisGenomes = this.populationManager.getLiving().map(i => i.genome);
+      const scores = [];
+      for (const genome of genesisGenomes) {
+        const result = await this.populationManager.fitnessEvaluator.runTasks(genome, this.inferenceEngine, testSet);
+        scores.push(result.score);
+      }
+      genesisTestScore = scores.reduce((s, v) => s + v, 0) / Math.max(1, scores.length);
+      console.log(`[EvalTest] Genesis avg score on held-out test (${testSet.length} tasks): ${(genesisTestScore * 100).toFixed(1)}%`);
+    }
+
+    // The real daemon runs Recovery every 30s to top up a population that
+    // dropped to 0-1 instances (src/daemon/lifecycle.js); a fast simulation
+    // has no such background process, so without this a run that gets
+    // unlucky early would report itself "done" while stuck at 1 instance
+    // for every remaining generation.
+    const recovery = new Recovery({
+      population: this.populationManager,
+      guardian: this.guardian,
+      lineage: this.lineage,
+      auditLog: this.auditLog,
+      nodeId: this.nodeId,
+    });
+
+    for (let i = 0; i < generations; i++) {
+      if (this.populationManager.getLiving().length < 2) {
+        const recovered = await recovery.run();
+        if (recovered.action !== 'none') {
+          console.log(`[Simulate] Generation ${i + 1}: population recovery (${recovered.action})`);
+        }
+      }
+
+      const result = await this.populationManager.runGeneration(this.inferenceEngine);
+      if (result.skipped) {
+        console.log(`[Simulate] Generation ${i + 1} skipped: ${result.reason}`);
+        continue;
+      }
+      history.push({
+        generation: result.generation,
+        populationSize: result.populationSize,
+        avgFitness: result.avgFitness,
+        bestFitness: result.bestFitness,
+        births: result.births,
+        deaths: result.deaths,
+      });
+    }
+
+    let evalTestResult = null;
+    if (evalTest) {
+      const best = this.populationManager.getBest();
+      const result = best
+        ? await this.populationManager.fitnessEvaluator.runTasks(best.genome, this.inferenceEngine, testSet)
+        : null;
+      const bestTestScore = result ? result.score : 0;
+      const deltaPoints = (bestTestScore - genesisTestScore) * 100;
+      console.log(`[EvalTest] Best agent avg score on held-out test: ${(bestTestScore * 100).toFixed(1)}%`);
+      console.log(`[EvalTest] Delta vs genesis: ${deltaPoints >= 0 ? '+' : ''}${deltaPoints.toFixed(1)} points (target: >= 15)`);
+      evalTestResult = {
+        testTasks: testSet.length,
+        genesisScore: genesisTestScore,
+        bestScore: bestTestScore,
+        deltaPoints,
+        meetsTarget: deltaPoints >= 15,
+      };
+    }
+
+    const elapsedMs = Date.now() - startedAt;
+    const summaryPath = resolve(getConfig().paths.data, 'snapshots', `simulation-${Date.now()}.json`);
+    mkdirSync(dirname(summaryPath), { recursive: true });
+    writeFileSync(summaryPath, JSON.stringify({ generations, elapsedMs, seed: getSeed(), history, evalTest: evalTestResult }, null, 2));
+
+    const last = history[history.length - 1];
+    console.log(`[Simulate] Done: ${generations} generation(s) in ${elapsedMs}ms.`);
+    console.log(`[Simulate] Final population: ${this.populationManager.getLiving().length}, best fitness: ${last?.bestFitness ?? 'n/a'}`);
+    console.log(`[Simulate] Summary saved to ${summaryPath}`);
+
+    return { elapsedMs, history, evalTest: evalTestResult };
   }
 
   // Graceful shutdown
@@ -252,36 +470,97 @@ class IaADN {
       this.api.stop();
     }
 
+    // Stop P2P listener
+    if (this.p2pNode) {
+      await this.p2pNode.stop();
+    }
+
     // Shutdown inference engine
     if (this.inferenceEngine) {
       await this.inferenceEngine.shutdown();
     }
 
-    // Save all genomes
-    for (const [id, inst] of this.population) {
-      if (inst.alive) {
-        try {
-          GenomeCodec.saveToFile(inst.genome);
-        } catch {
-          // best effort
-        }
+    // Save all genomes (SQLite already has live state; this JSON copy is a
+    // convenience for backup/P2P transfer, see src/genome/codec.js)
+    for (const inst of this.populationManager.getLiving()) {
+      try {
+        GenomeCodec.saveToFile(inst.genome);
+      } catch {
+        // best effort
       }
     }
 
     this.auditLog.log('system_shutdown', {
       nodeId: this.nodeId,
-      populationSize: this.population.size,
+      populationSize: this.populationManager.getLiving().length,
     });
+
+    // Flush and close the persistence store cleanly
+    if (this.persistenceStore) {
+      this.persistenceStore.close();
+    }
 
     console.log('[Shutdown] All genomes saved. Goodbye.');
   }
 }
 
+// API token precedence: IAADN_API_TOKEN env var, then data/config.json.
+// If neither exists, generate one and persist it (never the env value).
+function resolveApiToken(config) {
+  if (process.env.IAADN_API_TOKEN) return process.env.IAADN_API_TOKEN;
+  if (!config.network.apiToken) {
+    config.network.apiToken = randomBytes(32).toString('hex');
+    saveConfig(config);
+  }
+  return config.network.apiToken;
+}
+
 // --- Main ---
 const args = process.argv.slice(2);
 
+function parseFlag(name) {
+  const arg = args.find(a => a === `--${name}` || a.startsWith(`--${name}=`));
+  if (!arg) return null;
+  const eq = arg.indexOf('=');
+  return eq === -1 ? true : arg.slice(eq + 1);
+}
+
+if (args.includes('--show-token')) {
+  // Deliberate, owner-initiated read of the API token — prints it and exits
+  // without booting the rest of the system.
+  console.log(resolveApiToken(loadConfig()));
+  process.exit(0);
+}
+
+const exportDatasetFlag = parseFlag('export-dataset');
+if (exportDatasetFlag) {
+  // Dumps the dataset PersistenceStore has been accumulating (chat replies
+  // rated 👍/👎, plus every verified task-bank attempt from fitness
+  // evaluation) as JSONL — the input a future fine-tuning step would read.
+  // See docs/PLAN_EVOLUCION.md Fase 3. No need to boot the rest of the
+  // system for this.
+  const store = new PersistenceStore();
+  const rows = store.exportDataset({ minRating: -1 }); // include negatives too — see --export-dataset docs
+  store.close();
+
+  const outPath = exportDatasetFlag === true
+    ? resolve(getConfig().paths.data, 'training', `dataset-${Date.now()}.jsonl`)
+    : resolve(exportDatasetFlag);
+  mkdirSync(dirname(outPath), { recursive: true });
+  writeFileSync(outPath, rows.map(r => JSON.stringify(r)).join('\n') + (rows.length ? '\n' : ''));
+
+  console.log(`[ExportDataset] Wrote ${rows.length} example(s) to ${outPath}`);
+  console.log(`[ExportDataset] Positive (rating >= 1): ${rows.filter(r => r.rating >= 1).length}, negative: ${rows.filter(r => r.rating < 0).length}`);
+  process.exit(0);
+}
+
+const simulateFlag = parseFlag('simulate');
+const simulateGenerations = simulateFlag ? parseInt(simulateFlag === true ? '20' : simulateFlag, 10) : null;
+const seedOverride = parseFlag('seed');
+const evalTest = !!parseFlag('eval-test');
+
 const node = new IaADN();
-await node.boot();
+await node.boot({ simulate: simulateGenerations != null, seed: seedOverride || null });
 
 // Display status
 const status = node.getStatus();
@@ -291,7 +570,12 @@ console.log(`Population: ${status.population.length} living instance(s)`);
 console.log(`Resources: ${status.resources.cpuCores} CPU cores, ${status.resources.freeMemoryMB}MB free RAM`);
 console.log(`IOTAI: ${status.iotaiConnected ? 'connected' : 'standalone'}`);
 
-if (args.includes('--daemon')) {
+if (simulateGenerations != null) {
+  // Fast simulation mode: run the generations and exit — no daemon, no API left dangling
+  await node.runSimulation(simulateGenerations, { evalTest });
+  await node.shutdown();
+  process.exit(0);
+} else if (args.includes('--daemon')) {
   // Start the autonomous daemon — from here the system runs alone forever
   node.startDaemon();
 

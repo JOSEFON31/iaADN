@@ -36,12 +36,17 @@ export class InferenceEngine extends EventEmitter {
 
     const start = Date.now();
     const result = await this.backend.complete(messages, opts);
-    const elapsed = (Date.now() - start) / 1000;
+    // Floor elapsed time to 1ms: an instant (mock) backend often completes
+    // within the same millisecond, which would make Date.now()-start land on
+    // 0 on some calls and >0 on others — pure OS scheduling jitter, not a
+    // real timing signal — and that made speed-based fitness nondeterministic
+    // even with a fixed RNG seed. Flooring makes it a stable, if maximal, tps.
+    const elapsed = Math.max((Date.now() - start) / 1000, 0.001);
 
     // Update stats
     this.stats.totalInferences++;
     this.stats.totalTokens += result.tokensGenerated || 0;
-    if (elapsed > 0 && result.tokensGenerated) {
+    if (result.tokensGenerated) {
       const tps = result.tokensGenerated / elapsed;
       this.stats.avgTokensPerSec = (this.stats.avgTokensPerSec * (this.stats.totalInferences - 1) + tps) / this.stats.totalInferences;
     }
@@ -49,7 +54,7 @@ export class InferenceEngine extends EventEmitter {
     this.emit('inference', {
       elapsed,
       tokens: result.tokensGenerated,
-      tokensPerSec: elapsed > 0 ? (result.tokensGenerated / elapsed) : 0,
+      tokensPerSec: result.tokensGenerated / elapsed,
     });
 
     return result;
@@ -71,7 +76,7 @@ export class InferenceEngine extends EventEmitter {
 
     const start = Date.now();
     const result = await this.backend.chatComplete(messages, opts);
-    const elapsed = (Date.now() - start) / 1000;
+    const elapsed = Math.max((Date.now() - start) / 1000, 0.001);
 
     this.stats.totalInferences++;
     this.stats.totalTokens += result.tokensGenerated || 0;

@@ -22,12 +22,13 @@ import { Recovery } from './recovery.js';
 import { getConfig } from '../config.js';
 
 export class Lifecycle {
-  constructor({ population, inferenceEngine, guardian, lineage, killSwitch, iotaiBridge, auditLog, nodeId }) {
+  constructor({ population, inferenceEngine, guardian, lineage, killSwitch, iotaiBridge, auditLog, nodeId, genomeSync = null }) {
     this.population = population;
     this.inferenceEngine = inferenceEngine;
     this.guardian = guardian;
     this.killSwitch = killSwitch;
     this.auditLog = auditLog;
+    this.genomeSync = genomeSync; // src/network/sync.js — only set when P2P is configured (Fase 4)
     this.running = false;
 
     // Deferred promise — resolves when initial fitness evaluation completes
@@ -38,10 +39,10 @@ export class Lifecycle {
 
     // Initialize all autonomous modules
     this.autoEvolve = new AutoEvolve({ population, inferenceEngine, auditLog });
-    this.autoProgram = new AutoProgram({ population, inferenceEngine, guardian, auditLog });
+    this.autoProgram = new AutoProgram({ population, lineage, inferenceEngine, guardian, auditLog });
     this.autoReplicate = new AutoReplicate({ population, guardian, lineage, iotaiBridge, auditLog });
     this.autoPrune = new AutoPrune({ population, guardian, auditLog });
-    this.autoLearn = new AutoLearn({ population, inferenceEngine, auditLog });
+    this.autoLearn = new AutoLearn({ population, lineage, guardian, inferenceEngine, auditLog });
     this.heartbeat = new Heartbeat({ guardian, population, killSwitch });
     this.recovery = new Recovery({ population, guardian, lineage, auditLog, nodeId });
 
@@ -58,6 +59,12 @@ export class Lifecycle {
     this.cron.register('auto-replicate', config.autoReplicateInterval, () => this.autoReplicate.run(), { gate: this._evalReady });
     this.cron.register('auto-program', config.autoProgramInterval, () => this.autoProgram.run(), { gate: this._evalReady });
     this.cron.register('auto-learn', config.autoLearnInterval, () => this.autoLearn.run(), { gate: this._evalReady });
+
+    // Gossip is independent of fitness — no gate. Only registered when P2P
+    // is actually configured (see docs/PLAN_EVOLUCION.md Fase 4).
+    if (this.genomeSync) {
+      this.cron.register('p2p-gossip', getConfig().network.syncInterval, () => this.genomeSync.gossipState());
+    }
   }
 
   // Start the daemon — from this point on, the system is fully autonomous

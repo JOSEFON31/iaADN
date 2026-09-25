@@ -2,6 +2,7 @@
 // Like sexual reproduction — the child inherits traits from both parents
 
 import { Genome } from '../genome/genome.js';
+import { rng } from '../util/rng.js';
 
 export class CrossoverEngine {
   constructor() {}
@@ -30,7 +31,7 @@ export class CrossoverEngine {
     });
 
     const chromKeys = Object.keys(parentA.chromosomes);
-    const splitIdx = Math.floor(Math.random() * chromKeys.length);
+    const splitIdx = rng.int(0, chromKeys.length);
 
     for (let i = 0; i < chromKeys.length; i++) {
       const key = chromKeys[i];
@@ -85,7 +86,7 @@ export class CrossoverEngine {
         const geneName = childChrom.genes[i].name;
         const geneB = chromB.getGene(geneName);
 
-        if (geneB && Math.random() < swapProbability) {
+        if (geneB && rng.random() < swapProbability) {
           childChrom.genes[i] = geneB.clone();
         }
       }
@@ -142,7 +143,7 @@ export class CrossoverEngine {
         const geneName = childChrom.genes[i].name;
         const geneB = chromB.getGene(geneName);
 
-        if (geneB && Math.random() > preferA) {
+        if (geneB && rng.random() > preferA) {
           childChrom.genes[i] = geneB.clone();
         }
       }

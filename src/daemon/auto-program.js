@@ -1,18 +1,26 @@
 // iaADN - Auto Program: autonomous self-programming cycle
 // The AI analyzes its own weaknesses and writes code to improve
 // NO HUMAN INTERVENTION NEEDED
+//
+// The generated code is never applied to the live best instance — it's
+// applied to a *clone*, which is evaluated for real (FitnessEvaluator, same
+// as any other candidate) and only kept if it doesn't regress. If it's
+// worse, it's discarded and the original instance is untouched. See
+// docs/PLAN_EVOLUCION.md Fase 2 — no agent grades its own homework, and no
+// change goes live without being tested first.
 
 import { CodeGenerator } from '../selfprog/code-generator.js';
-import { RollbackManager } from '../selfprog/rollback.js';
+import { GenomeCodec } from '../genome/codec.js';
+import { rng } from '../util/rng.js';
 
 export class AutoProgram {
-  constructor({ population, inferenceEngine, guardian, auditLog }) {
+  constructor({ population, lineage, inferenceEngine, guardian, auditLog }) {
     this.population = population;
+    this.lineage = lineage;
     this.inferenceEngine = inferenceEngine;
     this.guardian = guardian;
     this.auditLog = auditLog;
     this.codeGenerator = new CodeGenerator({ inferenceEngine, auditLog });
-    this.rollbackManager = new RollbackManager();
   }
 
   // Run one autonomous self-programming cycle
@@ -34,13 +42,9 @@ export class AutoProgram {
 
     console.log(`[AutoProgram] Weakness identified: ${weakness.dimension} (${weakness.score})`);
 
-    // 2. Create snapshot before modification
-    const snapshotId = this.rollbackManager.createSnapshot(best.genome.instanceId, best.genome);
-
-    // 3. Generate improvement code
+    // 2. Generate improvement code
     const spec = this._generateSpec(weakness);
     const testCases = this._generateTestCases(weakness);
-
     const result = await this.codeGenerator.generateModule(spec, testCases);
 
     if (!result.success) {
@@ -48,33 +52,70 @@ export class AutoProgram {
       return { success: false, reason: result.reason };
     }
 
-    // 4. Validate code with guardian
+    // 3. Validate code with guardian
     const validation = this.guardian.validateCode(result.code);
     if (!validation.valid) {
       console.log(`[AutoProgram] Code rejected by guardian: ${validation.errors.join(', ')}`);
       return { success: false, reason: 'guardian_rejected', errors: validation.errors };
     }
 
-    // 5. Add code gene to genome
-    best.genome.chromosomes.specialization.addGene(result.gene);
+    // 4. Build a candidate child — the parent is never touched
+    const child = best.genome.replicate();
+    child.chromosomes.specialization.addGene(result.gene);
 
-    console.log(`[AutoProgram] New module integrated: ${result.hash} (pass rate: ${result.passRate})`);
+    const mutationCheck = this.guardian.validateMutation(best.genome, child);
+    if (!mutationCheck.valid) {
+      console.log(`[AutoProgram] Candidate rejected by guardian: ${mutationCheck.errors.join(', ')}`);
+      return { success: false, reason: 'guardian_rejected', errors: mutationCheck.errors };
+    }
 
-    this.auditLog.logSelfProgram(best.genome.instanceId, 'module_integrated', {
+    // 5. Evaluate the candidate for real before deciding anything
+    const evaluation = await this.population.fitnessEvaluator.evaluate(child, this.inferenceEngine);
+    const parentFitness = best.fitness ?? 0;
+
+    if (evaluation.overall < parentFitness) {
+      console.log(`[AutoProgram] Candidate scored worse (${evaluation.overall.toFixed(3)} < ${parentFitness.toFixed(3)}), discarding`);
+      this.auditLog.log('selfprog_rejected', {
+        parentId: best.genome.instanceId,
+        weakness: weakness.dimension,
+        hash: result.hash,
+        candidateFitness: evaluation.overall,
+        parentFitness,
+      });
+      return { success: false, reason: 'no_improvement', candidateFitness: evaluation.overall, parentFitness };
+    }
+
+    const spawnCheck = this.guardian.canSpawn();
+    if (!spawnCheck.allowed) {
+      console.log(`[AutoProgram] Candidate improved but cannot spawn: ${spawnCheck.reason}`);
+      return { success: false, reason: 'spawn_blocked' };
+    }
+
+    // 6. The candidate held up — register it as a new instance
+    this.population.addInstance(child, evaluation.overall);
+    this.lineage.recordBirth(child);
+    this.guardian.resourceLimits.registerInstance();
+    this.auditLog.logBirth(child);
+    GenomeCodec.saveToFile(child);
+
+    console.log(`[AutoProgram] New instance ${child.instanceId}: module ${result.hash} integrated (fitness ${evaluation.overall.toFixed(3)} vs parent ${parentFitness.toFixed(3)})`);
+
+    this.auditLog.logSelfProgram(child.instanceId, 'module_integrated', {
+      parentId: best.genome.instanceId,
       hash: result.hash,
       weakness: weakness.dimension,
-      snapshotId,
+      candidateFitness: evaluation.overall,
+      parentFitness,
     });
-
-    // 6. Prune old snapshots
-    this.rollbackManager.prune(best.genome.instanceId, 10);
 
     return {
       success: true,
-      instanceId: best.genome.instanceId,
+      parentId: best.genome.instanceId,
+      instanceId: child.instanceId,
       module: result.hash,
       weakness: weakness.dimension,
-      snapshotId,
+      candidateFitness: evaluation.overall,
+      parentFitness,
     };
   }
 
@@ -91,7 +132,7 @@ export class AutoProgram {
     if (!fitnessEntry?.data?.dimensions) {
       // No detailed fitness data, target a random dimension
       const dims = ['accuracy', 'speed', 'efficiency', 'specialization'];
-      return { dimension: dims[Math.floor(Math.random() * dims.length)], score: 0.5 };
+      return { dimension: rng.pick(dims), score: 0.5 };
     }
 
     const dims = fitnessEntry.data.dimensions;

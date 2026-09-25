@@ -4,6 +4,7 @@ import { Genome } from './genome.js';
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'fs';
 import { resolve } from 'path';
 import { getConfig } from '../config.js';
+import { signHash, verifyHash } from '../network/identity.js';
 
 export class GenomeCodec {
   // Encode genome to DAG metadata format (for IOTAI bridge)
@@ -53,22 +54,43 @@ export class GenomeCodec {
     return Genome.fromJSON(json);
   }
 
-  // Encode genome for P2P network transfer (compact binary-friendly format)
-  static toTransferFormat(genome) {
-    return {
+  // Encode genome for P2P network transfer (compact binary-friendly format).
+  // `identity` (from src/network/identity.js), if given, signs the genome's
+  // hash so a receiving node can verify it really came from this node and
+  // wasn't altered in transit — see docs/PLAN_EVOLUCION.md Fase 4.
+  static toTransferFormat(genome, identity = null) {
+    const envelope = {
       type: 'genome_transfer',
       version: 1,
       payload: genome.toJSON(),
       timestamp: Date.now(),
     };
+    if (identity) {
+      envelope.signature = signHash(genome.hash(), identity.privateKey);
+      envelope.publicKey = identity.publicKeyBase64;
+    }
+    return envelope;
   }
 
-  // Decode genome from P2P transfer format
-  static fromTransferFormat(data) {
+  // Decode genome from P2P transfer format. With `requireSignature: true`
+  // (the default for anything arriving over the network — see
+  // src/network/node.js), an unsigned or invalid-signature envelope throws
+  // instead of silently accepting the genome.
+  static fromTransferFormat(data, { requireSignature = false } = {}) {
     if (data.type !== 'genome_transfer') {
       throw new Error('Invalid transfer format');
     }
-    return Genome.fromJSON(data.payload);
+    const genome = Genome.fromJSON(data.payload);
+
+    let verified = false;
+    if (data.signature && data.publicKey) {
+      verified = verifyHash(genome.hash(), data.signature, data.publicKey);
+    }
+    if (requireSignature && !verified) {
+      throw new Error('Genome rejected: missing or invalid signature');
+    }
+
+    return { genome, verified, publicKey: data.publicKey || null };
   }
 
   // Create a birth record for DAG (lightweight, without full genome data)

@@ -14,10 +14,11 @@ echo "========================================="
 echo "[1/7] Updating system..."
 sudo apt update && sudo apt upgrade -y
 
-# 2. Install Node.js 20 LTS
-echo "[2/7] Installing Node.js 20..."
-if ! command -v node &> /dev/null || [[ $(node -v | cut -d'.' -f1 | tr -d 'v') -lt 20 ]]; then
-  curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
+# 2. Install Node.js 22 LTS — better-sqlite3 >=13 (used for persistence)
+# requires Node >=22; see package.json "engines".
+echo "[2/7] Installing Node.js 22..."
+if ! command -v node &> /dev/null || [[ $(node -v | cut -d'.' -f1 | tr -d 'v') -lt 22 ]]; then
+  curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
   sudo apt install -y nodejs
 fi
 echo "Node.js version: $(node -v)"
@@ -78,3 +79,6 @@ echo "Test it with:  node src/index.js"
 echo "Run daemon:    node src/index.js --daemon"
 echo ""
 echo "Next: run 'bash deploy/setup-service.sh' to configure auto-start"
+echo "Then:  run 'bash deploy/firewall.sh' for how to reach the API safely"
+echo "       (it listens on 127.0.0.1 only and needs the token from"
+echo "        'node src/index.js --show-token')"

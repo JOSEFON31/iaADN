@@ -3,6 +3,7 @@
 
 import { Genome } from '../genome/genome.js';
 import { GenomeCodec } from '../genome/codec.js';
+import { rng } from '../util/rng.js';
 
 export class Recovery {
   constructor({ population, guardian, lineage, auditLog, nodeId }) {
@@ -44,7 +45,7 @@ export class Recovery {
 
       // Add variation
       const tempGene = genome.getGene('temperature');
-      if (tempGene) tempGene.value = 0.4 + Math.random() * 0.6;
+      if (tempGene) tempGene.value = 0.4 + rng.random() * 0.6;
 
       this.population.addInstance(genome);
       this.lineage.recordBirth(genome);
@@ -61,12 +62,12 @@ export class Recovery {
 
     // Apply strong mutations for diversity
     const tempGene = child.getGene('temperature');
-    if (tempGene) tempGene.value = Math.random() * 1.5 + 0.2;
+    if (tempGene) tempGene.value = rng.random() * 1.5 + 0.2;
 
     const traitGene = child.getGene('traits');
     if (traitGene) {
       for (const key of Object.keys(traitGene.value)) {
-        traitGene.value[key] = Math.random();
+        traitGene.value[key] = rng.random();
       }
     }
 

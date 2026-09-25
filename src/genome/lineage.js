@@ -2,13 +2,22 @@
 // Records births, deaths, and ancestry on the IOTAI DAG
 
 export class Lineage {
-  constructor() {
+  constructor({ persistence = null, network = null } = {}) {
     // In-memory lineage graph: instanceId -> { parentIds, childIds, generation, alive, fitness, birthTime, deathTime }
     this.tree = new Map();
+    // Optional PersistenceStore — when set, every birth/death/fitness update
+    // below is mirrored to SQLite so the daemon can restart without losing
+    // history. This is the single choke point all callers go through.
+    this.persistence = persistence;
+    // Optional GenomeSync (src/network/sync.js) — when set, every locally
+    // originated birth is announced to the swarm (Fase 4). `announce: false`
+    // (used for genomes adopted *from* a peer) prevents an infinite
+    // re-broadcast loop between nodes.
+    this.network = network;
   }
 
   // Record a birth
-  recordBirth(genome, fitnessScore = null) {
+  recordBirth(genome, fitnessScore = null, { announce = true } = {}) {
     const entry = {
       instanceId: genome.instanceId,
       parentIds: genome.parentIds,
@@ -32,6 +41,9 @@ export class Lineage {
       }
     }
 
+    this.persistence?.recordBirth(genome);
+    if (announce) this.network?.announceBirth(genome).catch(() => {}); // best-effort, like any gossip
+
     return entry;
   }
 
@@ -43,6 +55,9 @@ export class Lineage {
     entry.alive = false;
     entry.deathTime = Date.now();
     entry.deathReason = reason;
+
+    this.persistence?.recordDeath(instanceId, reason);
+
     return entry;
   }
 
@@ -52,6 +67,8 @@ export class Lineage {
     if (entry) {
       entry.fitness = fitnessScore;
     }
+
+    this.persistence?.updateFitness(instanceId, fitnessScore);
   }
 
   // Get ancestry chain (parents, grandparents, etc.)

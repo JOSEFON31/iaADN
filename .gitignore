@@ -9,4 +9,8 @@ data/audit/*.jsonl
 data/genomes/*.json
 data/snapshots/*
 data/training/*
+data/iaadn.db
+data/iaadn.db-wal
+data/iaadn.db-shm
+data/node.key
 !data/**/.gitkeep

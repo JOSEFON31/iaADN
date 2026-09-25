@@ -129,14 +129,64 @@ describe('SelectionEngine', () => {
     assert.ok(survivorIds.includes(genomes[9].instanceId)); // fitness 0.9
     assert.ok(survivorIds.includes(genomes[8].instanceId)); // fitness 0.8
   });
+
+  it('should protect a niche-best genome that would otherwise be trimmed', () => {
+    const engine = new SelectionEngine({ tournamentSize: 2, elitismCount: 1 });
+    const genomes = [];
+    const fitnessScores = new Map();
+
+    for (let i = 0; i < 6; i++) {
+      const g = Genome.createGenesis('test');
+      genomes.push(g);
+      fitnessScores.set(g.instanceId, 0.9 - i * 0.1); // 0.9, 0.8, ..., 0.4
+    }
+    // The weakest genome overall (0.4) is the best in its own niche — without
+    // protection it would be trimmed by pure global-fitness ranking.
+    const nicheGenome = genomes[5];
+    const protectedIds = new Set([nicheGenome.instanceId]);
+
+    const { survivors, casualties } = engine.survivalSelection(genomes, fitnessScores, 3, protectedIds);
+    const survivorIds = survivors.map(s => s.instanceId);
+
+    assert.equal(survivors.length, 3);
+    assert.ok(survivorIds.includes(genomes[0].instanceId), 'global elite still survives');
+    assert.ok(survivorIds.includes(nicheGenome.instanceId), 'niche-protected genome survives despite low fitness');
+    assert.ok(!casualties.some(c => c.instanceId === nicheGenome.instanceId));
+  });
+
+  it('should never exceed carrying capacity even when protection would', () => {
+    const engine = new SelectionEngine({ tournamentSize: 2, elitismCount: 1 });
+    const genomes = [];
+    const fitnessScores = new Map();
+
+    for (let i = 0; i < 6; i++) {
+      const g = Genome.createGenesis('test');
+      genomes.push(g);
+      fitnessScores.set(g.instanceId, 1 - i * 0.1);
+    }
+    // Protect more genomes than the carrying capacity allows
+    const protectedIds = new Set(genomes.slice(0, 5).map(g => g.instanceId));
+
+    const { survivors, casualties } = engine.survivalSelection(genomes, fitnessScores, 2, protectedIds);
+    assert.equal(survivors.length, 2);
+    assert.equal(casualties.length, 4);
+  });
 });
 
 describe('FitnessEvaluator', () => {
-  it('should evaluate efficiency from genome config', () => {
+  it('should score efficiency from tokens spent per task solved', () => {
     const evaluator = new FitnessEvaluator();
-    const genome = Genome.createGenesis('test');
-    const efficiency = evaluator.evaluateEfficiency(genome);
-    assert.ok(efficiency >= 0 && efficiency <= 1);
+    const cheap = evaluator.evaluateEfficiency({ tokensUsed: 40, correctCount: 1 });
+    const expensive = evaluator.evaluateEfficiency({ tokensUsed: 400, correctCount: 1 });
+    assert.ok(cheap >= 0 && cheap <= 1);
+    assert.ok(expensive >= 0 && expensive <= 1);
+    assert.ok(cheap > expensive, 'solving with fewer tokens should score higher');
+  });
+
+  it('should score solving nothing at the floor, not reward silence', () => {
+    const evaluator = new FitnessEvaluator();
+    const efficiency = evaluator.evaluateEfficiency({ tokensUsed: 0, correctCount: 0 });
+    assert.equal(efficiency, 0.1);
   });
 
   it('should evaluate specialization', () => {

@@ -186,6 +186,20 @@
     .message.ai .msg-meta { color: var(--text-dim); }
     .message.user .msg-meta { color: rgba(255,255,255,0.6); }
 
+    .rating-row { display: flex; gap: 6px; margin-top: 6px; }
+    .rate-btn {
+      background: none;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 2px 8px;
+      font-size: 0.85em;
+      cursor: pointer;
+      opacity: 0.6;
+    }
+    .rate-btn:hover:not(:disabled) { opacity: 1; border-color: var(--accent); }
+    .rate-btn:disabled { cursor: default; }
+    .rate-btn.rated { opacity: 1; border-color: var(--accent2); background: rgba(162,155,254,0.15); }
+
     .message.system {
       align-self: center;
       background: none;
@@ -266,6 +280,22 @@
     .input-area button:hover { background: var(--accent2); }
     .input-area button:disabled { opacity: 0.5; cursor: not-allowed; }
 
+    /* API token form — shown until a valid token is entered */
+    .input-area input {
+      flex: 1;
+      min-width: 0;
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 10px 14px;
+      color: var(--text);
+      font-family: inherit;
+      font-size: 0.92em;
+      outline: none;
+    }
+    .input-area input:focus { border-color: var(--accent); }
+    [hidden] { display: none !important; }
+
     /* Scrollbar */
     ::-webkit-scrollbar { width: 6px; }
     ::-webkit-scrollbar-track { background: transparent; }
@@ -301,6 +331,12 @@
     <div id="lineageStats" class="instance-card" style="color: var(--text-dim); font-size: 0.8em;">
       Loading...
     </div>
+    <h3 style="margin-top:16px">Fitness over time</h3>
+    <svg id="fitnessChart" viewBox="0 0 200 60" preserveAspectRatio="none"
+      style="width:100%;height:60px;background:var(--surface2);border:1px solid var(--border);border-radius:8px;"></svg>
+    <div style="font-size:0.72em;color:var(--text-dim);margin-top:4px;">
+      <span style="color:#888898;">— avg</span> &nbsp; <span style="color:#a29bfe;">— best</span>
+    </div>
   </aside>
 
   <div class="chat-area">
@@ -310,7 +346,11 @@
     <div class="typing" id="typing">
       <span></span><span></span><span></span>
     </div>
-    <div class="input-area">
+    <form class="input-area" id="tokenForm" hidden>
+      <input id="tokenInput" type="password" autocomplete="off" placeholder="API token (node src/index.js --show-token)" aria-label="API token">
+      <button type="submit">Connect</button>
+    </form>
+    <div class="input-area" id="chatForm">
       <textarea id="input" rows="1" placeholder="Send a message to the hive mind..." autofocus></textarea>
       <button id="sendBtn" onclick="sendMessage()">Send</button>
     </div>
@@ -323,6 +363,72 @@ const messagesEl = document.getElementById('messages');
 const inputEl = document.getElementById('input');
 const sendBtn = document.getElementById('sendBtn');
 const typingEl = document.getElementById('typing');
+const tokenForm = document.getElementById('tokenForm');
+const tokenInput = document.getElementById('tokenInput');
+const chatForm = document.getElementById('chatForm');
+
+// --- API token (kept in this browser only; storage may be unavailable) ---
+const TOKEN_KEY = 'iaadn.apiToken';
+let apiToken = null;
+try { apiToken = localStorage.getItem(TOKEN_KEY); } catch {}
+
+function setToken(value) {
+  apiToken = value;
+  try {
+    if (value) localStorage.setItem(TOKEN_KEY, value);
+    else localStorage.removeItem(TOKEN_KEY);
+  } catch {}
+}
+
+function showTokenForm(reason) {
+  // Several polls can 401 at once — only announce it the first time
+  if (!tokenForm.hidden) reason = null;
+  setToken(null);
+  chatForm.hidden = true;
+  tokenForm.hidden = false;
+  document.getElementById('statusDot').className = 'dot orange';
+  document.getElementById('statusText').textContent = 'Token required';
+  if (reason) addMessage(reason, 'system');
+  tokenInput.focus();
+}
+
+function showChat() {
+  tokenForm.hidden = true;
+  chatForm.hidden = false;
+  inputEl.focus();
+}
+
+tokenForm.addEventListener('submit', (e) => {
+  e.preventDefault();
+  const value = tokenInput.value.trim();
+  if (!value) return;
+  tokenInput.value = '';
+  setToken(value);
+  showChat();
+  refreshStatus();
+  refreshLineage();
+  refreshGenerations();
+});
+
+class UnauthorizedError extends Error {}
+
+// fetch() with the bearer token; a 401 drops the token and asks again
+async function apiFetch(path, options = {}) {
+  if (!apiToken) throw new UnauthorizedError('No token');
+  const res = await fetch(`${API_BASE}${path}`, {
+    ...options,
+    headers: { ...(options.headers || {}), Authorization: `Bearer ${apiToken}` },
+  });
+  if (res.status === 401) {
+    showTokenForm('Invalid or missing API token. Enter it again.');
+    throw new UnauthorizedError('Unauthorized');
+  }
+  if (res.status === 429) {
+    const wait = res.headers.get('Retry-After') || '60';
+    throw new Error(`Too many requests — try again in ${wait}s`);
+  }
+  return res;
+}
 
 // Auto-resize textarea
 inputEl.addEventListener('input', () => {
@@ -338,7 +444,7 @@ inputEl.addEventListener('keydown', (e) => {
   }
 });
 
-function addMessage(text, type, meta) {
+function addMessage(text, type, meta, interactionId) {
   const div = document.createElement('div');
   div.className = `message ${type}`;
   div.textContent = text;
@@ -348,8 +454,49 @@ function addMessage(text, type, meta) {
     metaDiv.textContent = meta;
     div.appendChild(metaDiv);
   }
+  if (type === 'ai' && interactionId != null) {
+    div.appendChild(buildRatingRow(interactionId));
+  }
   messagesEl.appendChild(div);
   messagesEl.scrollTop = messagesEl.scrollHeight;
+}
+
+// 👍/👎 on a chat reply — see docs/PLAN_EVOLUCION.md Fase 3. A 👍 makes the
+// exchange recallable later (PersistenceStore.searchMemory); either one is
+// just recorded as feedback.
+function buildRatingRow(interactionId) {
+  const row = document.createElement('div');
+  row.className = 'rating-row';
+
+  const rate = async (rating, btn, otherBtn) => {
+    btn.disabled = true;
+    otherBtn.disabled = true;
+    try {
+      await apiFetch(`/api/interactions/${interactionId}/rate`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ rating }),
+      });
+      btn.classList.add('rated');
+    } catch {
+      btn.disabled = false;
+      otherBtn.disabled = false;
+    }
+  };
+
+  const up = document.createElement('button');
+  up.className = 'rate-btn';
+  up.type = 'button';
+  up.textContent = '👍';
+  const down = document.createElement('button');
+  down.className = 'rate-btn';
+  down.type = 'button';
+  down.textContent = '👎';
+
+  up.addEventListener('click', () => rate(1, up, down));
+  down.addEventListener('click', () => rate(-1, down, up));
+  row.append(up, down);
+  return row;
 }
 
 async function sendMessage() {
@@ -364,7 +511,7 @@ async function sendMessage() {
   typingEl.classList.add('active');
 
   try {
-    const res = await fetch(`${API_BASE}/api/chat`, {
+    const res = await apiFetch('/api/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ message: text }),
@@ -378,10 +525,12 @@ async function sendMessage() {
       const meta = data.metadata
         ? `${data.metadata.mode || data.metadata.decomposition || ''} | ${data.metadata.elapsed ? data.metadata.elapsed + 'ms' : ''} | instances: ${data.metadata.instancesUsed ?? '?'}`
         : '';
-      addMessage(data.response, 'ai', meta);
+      addMessage(data.response, 'ai', meta, data.metadata?.interactionId);
     }
   } catch (err) {
-    addMessage(`Connection error: ${err.message}`, 'system');
+    if (!(err instanceof UnauthorizedError)) {
+      addMessage(`Connection error: ${err.message}`, 'system');
+    }
   }
 
   typingEl.classList.remove('active');
@@ -389,10 +538,32 @@ async function sendMessage() {
   inputEl.focus();
 }
 
+function el(tag, className, text) {
+  const node = document.createElement(tag);
+  if (className) node.className = className;
+  if (text != null) node.textContent = text;
+  return node;
+}
+
+// The API sends specialization as { domain: weight }; show the strongest one
+function topSpecialization(spec) {
+  if (!spec || typeof spec !== 'object') return 'general';
+  let best = 'general';
+  let bestWeight = -Infinity;
+  for (const [domain, weight] of Object.entries(spec)) {
+    if (typeof weight === 'number' && weight > bestWeight) {
+      best = domain;
+      bestWeight = weight;
+    }
+  }
+  return bestWeight === -Infinity ? 'general' : `${best} ${bestWeight.toFixed(2)}`;
+}
+
 // Poll status
 async function refreshStatus() {
+  if (!apiToken) return;
   try {
-    const res = await fetch(`${API_BASE}/api/status`);
+    const res = await apiFetch('/api/status');
     const data = await res.json();
 
     document.getElementById('statusDot').className = 'dot green';
@@ -400,50 +571,112 @@ async function refreshStatus() {
     document.getElementById('popCount').textContent = `Pop: ${data.population ?? 0}`;
     document.getElementById('inferenceStatus').textContent = `Inference: ${data.inferenceReady ? 'Ready' : 'Offline'}`;
 
-    // Render instances
+    // Render instances (built with textContent — no server data goes through innerHTML)
     const listEl = document.getElementById('instanceList');
+    listEl.replaceChildren();
     if (data.instances && data.instances.length > 0) {
-      listEl.innerHTML = data.instances.map(inst => `
-        <div class="instance-card">
-          <div class="id">${inst.id?.slice(0, 20) || '?'}</div>
-          <div class="meta">
-            <span>Gen ${inst.generation}</span>
-            <span>${inst.specialization || 'general'}</span>
-            <span>F: ${inst.fitness != null ? inst.fitness.toFixed(2) : '?'}</span>
-          </div>
-          <div class="fitness-bar"><div class="fill" style="width:${((inst.fitness || 0) * 100).toFixed(0)}%"></div></div>
-        </div>
-      `).join('');
+      for (const inst of data.instances) {
+        const card = el('div', 'instance-card');
+        card.append(el('div', 'id', inst.id?.slice(0, 20) || '?'));
+        const meta = el('div', 'meta');
+        meta.append(
+          el('span', null, `Gen ${inst.generation ?? '?'}`),
+          el('span', null, topSpecialization(inst.specialization)),
+          el('span', null, `F: ${typeof inst.fitness === 'number' ? inst.fitness.toFixed(2) : '?'}`),
+        );
+        card.append(meta);
+        const bar = el('div', 'fitness-bar');
+        const fill = el('div', 'fill');
+        const pct = Math.max(0, Math.min(100, (Number(inst.fitness) || 0) * 100));
+        fill.style.width = `${pct.toFixed(0)}%`;
+        bar.append(fill);
+        card.append(bar);
+        listEl.append(card);
+      }
     } else {
-      listEl.innerHTML = '<div class="instance-card" style="color:var(--text-dim)">No instances</div>';
+      const empty = el('div', 'instance-card', 'No instances');
+      empty.style.color = 'var(--text-dim)';
+      listEl.append(empty);
     }
-  } catch {
-    document.getElementById('statusDot').className = 'dot red';
-    document.getElementById('statusText').textContent = 'Disconnected';
+  } catch (err) {
+    if (err instanceof UnauthorizedError) return;
+    const limited = err.message.startsWith('Too many requests');
+    document.getElementById('statusDot').className = limited ? 'dot orange' : 'dot red';
+    document.getElementById('statusText').textContent = limited ? 'Rate limited' : 'Disconnected';
   }
 }
 
 async function refreshLineage() {
+  if (!apiToken) return;
   try {
-    const res = await fetch(`${API_BASE}/api/lineage`);
+    const res = await apiFetch('/api/lineage');
     const data = await res.json();
     const s = data.stats || {};
-    document.getElementById('lineageStats').innerHTML = `
-      Total births: ${s.totalBirths ?? 0}<br>
-      Total deaths: ${s.totalDeaths ?? 0}<br>
-      Living: ${s.livingCount ?? 0}<br>
-      Max generation: ${s.maxGeneration ?? 0}
-    `;
+    // Field names match Lineage.getStats() in src/genome/lineage.js
+    const lines = [
+      `Total births: ${s.total ?? 0}`,
+      `Total deaths: ${s.dead ?? 0}`,
+      `Living: ${s.living ?? 0}`,
+      `Max generation: ${s.currentGeneration ?? 0}`,
+    ];
+    const box = document.getElementById('lineageStats');
+    box.replaceChildren();
+    lines.forEach((line, i) => {
+      if (i > 0) box.append(document.createElement('br'));
+      box.append(line);
+    });
   } catch {
     document.getElementById('lineageStats').textContent = 'Unavailable';
   }
 }
 
+const SVG_NS = 'http://www.w3.org/2000/svg';
+
+async function refreshGenerations() {
+  if (!apiToken) return;
+  try {
+    const res = await apiFetch('/api/generations?limit=50');
+    const data = await res.json();
+    renderFitnessChart(data.generations || []);
+  } catch {
+    // leave whatever was last drawn — a blank chart isn't worth a message
+  }
+}
+
+// Draws avg/best fitness per generation as two polylines. Built with SVG DOM
+// nodes (not innerHTML) so server-provided numbers never touch markup.
+function renderFitnessChart(generations) {
+  const svg = document.getElementById('fitnessChart');
+  svg.replaceChildren();
+  if (generations.length < 2) return;
+
+  const width = 200, height = 60, pad = 4;
+  const stepX = (width - pad * 2) / (generations.length - 1);
+  const toY = (v) => height - pad - (Math.max(0, Math.min(1, Number(v) || 0)) * (height - pad * 2));
+
+  const line = (key, color) => {
+    const points = generations
+      .map((g, i) => `${(pad + i * stepX).toFixed(1)},${toY(g[key]).toFixed(1)}`)
+      .join(' ');
+    const el = document.createElementNS(SVG_NS, 'polyline');
+    el.setAttribute('points', points);
+    el.setAttribute('fill', 'none');
+    el.setAttribute('stroke', color);
+    el.setAttribute('stroke-width', '1.5');
+    return el;
+  };
+
+  svg.append(line('avgFitness', '#888898'), line('bestFitness', '#a29bfe'));
+}
+
 // Initial load + polling
+if (apiToken) showChat(); else showTokenForm();
 refreshStatus();
 refreshLineage();
+refreshGenerations();
 setInterval(refreshStatus, 5000);
 setInterval(refreshLineage, 15000);
+setInterval(refreshGenerations, 15000);
 </script>
 
 </body>
