@@ -48,6 +48,23 @@ const DEFAULT_CONFIG = {
     maxMutationMagnitude: 0.2, // max 20% change per mutation
     minFitnessFloor: 0.3, // below this = instant death
     noveltyWeight: 0.1, // bonus for behavioral diversity
+
+    // Energy economy (Fase 4) — reproduction is gated on accumulated
+    // success, not just fitness rank, and existing costs something every
+    // generation. See docs/PLAN_EVOLUCION.md Fase 4.
+    startingEnergy: 1.0,
+    energyPerFitness: 0.6, // gained per generation, proportional to fitness
+    // Deliberately higher than minFitnessFloor * energyPerFitness (0.3*0.6=0.18):
+    // an instance right at the bare survival floor still slowly starves.
+    // Breakeven fitness is metabolismCost/energyPerFitness = 0.5 — merely
+    // clearing the fitness floor isn't enough to sustain yourself forever,
+    // only meaningfully outperforming it is. Verified via a unit test
+    // (tests/energy.test.js) that starvation is reachable in practice, not
+    // dead code shadowed by the fitness-floor kill.
+    metabolismCost: 0.3,
+    energyCap: 3.0, // no point hoarding indefinitely
+    reproductionEnergyCost: 0.4, // a parent must have this much to reproduce
+    childStartingEnergyShare: 0.5, // fraction of that cost the child starts with
   },
 
   // Fitness weights
@@ -101,6 +118,13 @@ const DEFAULT_CONFIG = {
     maxPeers: 50,
     maxBandwidthPerHour: 100 * 1024 * 1024, // 100MB
     syncInterval: 5 * 60 * 1000, // 5 minutes
+
+    // P2P (Fase 4) — opt-in, same "private by default" posture as the API:
+    // with no peers configured, or no shared secret, the P2P listener never
+    // starts. p2pHost defaults to loopback; only change it deliberately.
+    p2pHost: '127.0.0.1',
+    peers: [], // [{ host, port }] — the swarm's fixed, manually-configured address book
+    p2pSharedSecret: null, // IAADN_P2P_SECRET env var; must be the same on every node in the swarm
   },
 
   // Compute pool

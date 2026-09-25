@@ -34,6 +34,7 @@ export class API {
     guardian,
     killSwitch,
     persistence = null,
+    p2pNode = null,
     nodeId,
     port = 9091,
     host = '127.0.0.1',
@@ -51,6 +52,7 @@ export class API {
     this.guardian = guardian;
     this.killSwitch = killSwitch;
     this.persistence = persistence;
+    this.p2pNode = p2pNode;
     this.nodeId = nodeId;
     this.port = port;
     this.host = host;
@@ -120,6 +122,9 @@ export class API {
       }
       if (path === '/api/generations') {
         return this._handleGenerations(res, url.searchParams);
+      }
+      if (path === '/api/peers') {
+        return this._handlePeers(res);
       }
       const rateMatch = path.match(/^\/api\/interactions\/(\d+)\/rate$/);
       if (rateMatch && req.method === 'POST') {
@@ -313,6 +318,19 @@ export class API {
     }
     const limit = Math.min(500, Math.max(1, parseInt(searchParams.get('limit'), 10) || 100));
     return this._json(res, { generations: this.persistence.listGenerations(limit) });
+  }
+
+  // P2P swarm visibility (Fase 4) — never returns nodeId private keys, just
+  // the public status src/network/node.js already tracks.
+  _handlePeers(res) {
+    if (!this.p2pNode) {
+      return this._json(res, { connected: false, peers: [] });
+    }
+    return this._json(res, {
+      connected: this.p2pNode.connected,
+      nodeId: this.p2pNode.nodeId,
+      peers: this.p2pNode.getPeers(),
+    });
   }
 
   // 👍/👎 on a chat reply — see docs/PLAN_EVOLUCION.md Fase 3. A positive

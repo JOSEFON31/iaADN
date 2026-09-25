@@ -41,11 +41,16 @@ export class GenomeSync {
     });
   }
 
-  // Announce birth to network
+  // Announce birth to network, including the full signed genome (not just
+  // the lightweight birth record) so a receiving node can adopt it directly
+  // without a follow-up request. See docs/PLAN_EVOLUCION.md Fase 4.
   async announceBirth(genome) {
     await this.node.broadcast('/iaADN/evolution/1.0.0', {
       type: 'birth_announcement',
-      data: GenomeCodec.createBirthRecord(genome),
+      data: {
+        ...GenomeCodec.createBirthRecord(genome),
+        envelope: GenomeCodec.toTransferFormat(genome, this.node.identity),
+      },
       senderId: this.node.nodeId,
     });
   }

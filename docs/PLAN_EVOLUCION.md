@@ -258,20 +258,44 @@ criterio real de la Fase 2 queda pendiente de comprobar con un modelo cargado de
 **Salida:** no evaluable todavía — depende de un adaptador LoRA real que compare contra la línea base, y eso
 depende de tener un modelo cargado y GPU disponible, ninguno de los dos presente en este entorno.
 
-### Fase 4 — Autorreplicación controlada (2–3 semanas)
+### Fase 4 — Autorreplicación controlada (2–3 semanas) — 🟡 primera tanda hecha
 
-- Cada agente corre en **su propio proceso** (luego contenedor Docker/Podman) lanzado por el orquestador, con cuota
-  de CPU, RAM, tiempo y sin red salvo al orquestador.
-- **Economía de recursos:** cada agente tiene "energía" (presupuesto de cómputo) que gana resolviendo tareas bien y
-  gasta al pensar y al reproducirse. Sin energía → muere. Reproducirse cuesta energía, así que solo los exitosos se
-  reproducen. La capacidad de carga total la fijas tú.
-- **Multi-nodo:** convertir `src/network/` en P2P real (libp2p) entre **nodos que tú u otros voluntarios instalan y
-  registran** con una clave. Los genomas migran entre nodos (modelo de islas: poblaciones separadas que intercambian
-  individuos cada N generaciones — mejora la diversidad).
-- Genomas **firmados** (ed25519) por el orquestador que los creó; un nodo rechaza genomas sin firma válida o que no pasan
-  el guardian.
+- **Contenedor por agente — NO hecho.** Este entorno de desarrollo no tiene un demonio de Docker/Podman accesible
+  (el binario `docker` está pero no hay `dockerd` corriendo), así que no se podía ni ejecutar ni comprobar de
+  verdad ese aislamiento. Queda pendiente para cuando esto se despliegue en una máquina con Docker de verdad.
+- **Economía de energía — hecha.** Cada instancia tiene `energy` (`src/evolution/population.js`): sube con el
+  fitness, baja con un coste de metabolismo cada generación. El coste de metabolismo se fijó **más alto** que
+  `minFitnessFloor × energyPerFitness` a propósito — probándolo encontré que con los números iniciales un agente
+  que simplemente superara el umbral de fitness nunca podía morir de inanición en la práctica (la ganancia
+  siempre superaba el coste), dejando ese camino de muerte como código muerto. Ahora superar el umbral de fitness
+  no basta para sostenerse solo; hay que rendir claramente por encima. Reproducirse cuesta energía aparte
+  (`reproductionEnergyCost`) y se bloquea si ningún progenitor la tiene ahorrada — ser elegido como progenitor ya
+  no garantiza descendencia. Verificado con tests dedicados (`tests/energy.test.js`) y con `--simulate` en 5
+  semillas (60 generaciones cada una, población sana en todas).
+- **Genomas firmados — hechos, con ed25519 nativo de Node (sin librerías nuevas).** `src/network/identity.js`
+  genera un par de claves por nodo la primera vez que arranca (clave privada en `data/node.key`, permisos 600,
+  nunca sale de la máquina). `GenomeCodec.toTransferFormat`/`fromTransferFormat` firman y verifican; un genoma sin
+  firma válida se rechaza (`requireSignature: true` en cualquier cosa que llegue por red). Probado que un genoma
+  firmado por un nodo no se puede hacer pasar por el de otro.
+- **Multi-nodo — hecho, pero no con libp2p.** `src/network/node.js` (antes no hacía nada: "In standalone mode,
+  messages go nowhere") ahora es un transporte HTTP real y mínimo, no libp2p — evita esa dependencia y su huella,
+  y es exactamente lo verificable en este entorno: dos procesos reales en la misma máquina, cada uno con su
+  propio puerto y directorio de datos, hablando por HTTP de verdad. El "swarm" es una lista fija de pares
+  (`network.peers`) que comparten un secreto (`IAADN_P2P_SECRET`) — mismo principio de "privado por defecto" que
+  la API: sin secreto, el nodo nunca abre el puerto. Un genoma nacido en un nodo se anuncia firmado a sus pares;
+  el que lo recibe verifica la firma y las reglas de seguridad antes de adoptarlo en su propia población (modelo
+  de islas). Se evita el bucle de reenvío infinito marcando los genomas adoptados como "no reanunciar".
+  **Verificado de verdad, no solo con tests:** dos procesos `node src/index.js --daemon` corriendo en paralelo,
+  cada uno con su propio `data/`, intercambiaron genomas real y bidireccionalmente por HTTP — cada nodo terminó
+  con una población de 7 instancias mezclando las suyas propias y las inmigradas del otro nodo, visible en
+  `/api/population` y `/api/peers` de cada uno.
 
-**Salida:** 3 nodos intercambiando migrantes durante 72 h sin intervención, con uso de recursos dentro de cuota.
+**No probado:** las 72 horas seguidas de intercambio que pedía el criterio de salida original — eso hace falta
+correrlo aparte, en tiempo real, no en una sesión de desarrollo.
+
+**Salida (parcial, medida):** el mecanismo de intercambio funciona de verdad entre nodos reales (verificado en
+minutos, no en 72h) y el uso de recursos por nodo queda dentro de lo que ya limitaba `ResourceLimits` desde antes
+de esta fase. Falta el aislamiento por contenedor y la prueba de resistencia de 72h.
 
 ### Fase 5 — Al servicio de las personas (2–3 semanas, en paralelo con 3–4)
 

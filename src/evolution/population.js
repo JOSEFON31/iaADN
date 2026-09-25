@@ -13,6 +13,7 @@ export class Population {
   constructor({ guardian, lineage, auditLog, persistence = null }) {
     this.instances = new Map(); // instanceId -> { genome, fitness, engine, alive }
     this.fitnessScores = new Map(); // instanceId -> score (0-1)
+    this.energy = new Map(); // instanceId -> energy (0..energyCap) — see docs/PLAN_EVOLUCION.md Fase 4
     this.generation = 0;
 
     this.guardian = guardian;
@@ -39,7 +40,7 @@ export class Population {
   }
 
   // Add an instance to the population
-  addInstance(genome, fitness = null) {
+  addInstance(genome, fitness = null, energy = null) {
     this.instances.set(genome.instanceId, {
       genome,
       fitness,
@@ -48,6 +49,7 @@ export class Population {
     if (fitness != null) {
       this.fitnessScores.set(genome.instanceId, fitness);
     }
+    this.energy.set(genome.instanceId, energy ?? getConfig().evolution.startingEnergy);
   }
 
   // Remove an instance (death)
@@ -60,6 +62,7 @@ export class Population {
     this.auditLog.logDeath(instanceId, reason, this.fitnessScores.get(instanceId));
     this.instances.delete(instanceId);
     this.fitnessScores.delete(instanceId);
+    this.energy.delete(instanceId);
     this.guardian.resourceLimits.unregisterInstance();
   }
 
@@ -99,6 +102,17 @@ export class Population {
         inst.fitness = result.overall;
         this.fitnessScores.set(inst.genome.instanceId, result.overall);
         this.lineage.updateFitness(inst.genome.instanceId, result.overall);
+
+        // Energy economy (Fase 4): being alive costs something every
+        // generation, doing well earns it back. Reproduction later checks
+        // this — an instance can be fit-enough-to-survive without having
+        // saved up enough to reproduce yet.
+        const econ = getConfig().evolution;
+        const prevEnergy = this.energy.get(inst.genome.instanceId) ?? econ.startingEnergy;
+        const nextEnergy = Math.max(0, Math.min(econ.energyCap,
+          prevEnergy - econ.metabolismCost + result.overall * econ.energyPerFitness));
+        this.energy.set(inst.genome.instanceId, nextEnergy);
+
         this.auditLog.logFitness(inst.genome.instanceId, result);
         this.persistence?.recordFitnessDetail(inst.genome.instanceId, result);
 
@@ -170,22 +184,28 @@ export class Population {
     // 1. Evaluate fitness
     await this.evaluateAll(inferenceEngine);
 
-    // 2. Kill instances below fitness floor
+    // 2. Kill instances below the fitness floor, or out of energy (Fase 4:
+    // being alive costs something every generation regardless of rank).
     const killed = [];
     for (const inst of this.getLiving()) {
       if (this.guardian.shouldKill(inst.fitness ?? 0)) {
         killed.push(inst.genome.instanceId);
         this.removeInstance(inst.genome.instanceId, 'below_fitness_floor');
+      } else if ((this.energy.get(inst.genome.instanceId) ?? 0) <= 0) {
+        killed.push(inst.genome.instanceId);
+        this.removeInstance(inst.genome.instanceId, 'starved');
       }
     }
 
-    // 3. Produce offspring
+    // 3. Produce offspring — gated on energy, not just being selected as a
+    // parent (see _produceOffspring): fit-enough-to-survive doesn't
+    // guarantee enough saved up to reproduce yet.
     const livingAfterPrune = this.getLiving();
     const births = [];
 
     if (livingAfterPrune.length >= 2) {
       const offspring = this._produceOffspring(livingAfterPrune);
-      for (const childGenome of offspring) {
+      for (const { genome: childGenome, startingEnergy } of offspring) {
         // Validate mutation with guardian
         const parentGenome = livingAfterPrune[0].genome;
         const validation = this.guardian.validateMutation(parentGenome, childGenome);
@@ -193,7 +213,7 @@ export class Population {
         if (validation.valid) {
           const spawnCheck = this.guardian.canSpawn();
           if (spawnCheck.allowed) {
-            this.addInstance(childGenome);
+            this.addInstance(childGenome, null, startingEnergy);
             this.lineage.recordBirth(childGenome);
             this.auditLog.logBirth(childGenome);
             this.guardian.resourceLimits.registerInstance();
@@ -246,10 +266,15 @@ export class Population {
     };
   }
 
-  // Produce offspring from current population
+  // Produce offspring from current population. Reproduction costs energy
+  // (Fase 4) — a parent (or both, for crossover) must have saved up
+  // `reproductionEnergyCost` or that reproduction slot is skipped entirely,
+  // so being selected as a parent doesn't guarantee an offspring. Returns
+  // [{ genome, startingEnergy }], not bare genomes.
   _produceOffspring(livingInstances) {
     const offspring = [];
     const genomes = livingInstances.map(i => i.genome);
+    const econ = getConfig().evolution;
 
     // Produce enough offspring to potentially fill population
     const targetOffspring = Math.max(1, Math.floor(this.maxSize * 0.3));
@@ -258,16 +283,31 @@ export class Population {
       const [parentA, parentB] = this.selectionEngine.selectParents(genomes, this.fitnessScores);
 
       let child;
+      let startingEnergy;
       if (rng.random() < this.crossoverRate) {
-        // Crossover: combine two parents
+        // Crossover: both parents pay the cost
+        const energyA = this.energy.get(parentA.instanceId) ?? 0;
+        const energyB = this.energy.get(parentB.instanceId) ?? 0;
+        if (energyA < econ.reproductionEnergyCost || energyB < econ.reproductionEnergyCost) continue;
+
         const metaGene = parentA.getGene('crossoverPreference');
         const strategy = metaGene?.value || 'uniform';
         child = this.crossoverEngine.crossover(parentA, parentB, strategy);
+
+        this.energy.set(parentA.instanceId, energyA - econ.reproductionEnergyCost);
+        this.energy.set(parentB.instanceId, energyB - econ.reproductionEnergyCost);
+        startingEnergy = econ.reproductionEnergyCost * econ.childStartingEnergyShare * 2;
       } else {
-        // Clone: replicate the fitter parent
+        // Clone: the fitter parent alone pays the cost
         const fitnessA = this.fitnessScores.get(parentA.instanceId) ?? 0;
         const fitnessB = this.fitnessScores.get(parentB.instanceId) ?? 0;
-        child = (fitnessA >= fitnessB ? parentA : parentB).replicate();
+        const parent = fitnessA >= fitnessB ? parentA : parentB;
+        const energy = this.energy.get(parent.instanceId) ?? 0;
+        if (energy < econ.reproductionEnergyCost) continue;
+
+        child = parent.replicate();
+        this.energy.set(parent.instanceId, energy - econ.reproductionEnergyCost);
+        startingEnergy = econ.reproductionEnergyCost * econ.childStartingEnergyShare;
       }
 
       // Mutate the child
@@ -277,7 +317,7 @@ export class Population {
       }
       this.mutationEngine.mutate(child);
 
-      offspring.push(child);
+      offspring.push({ genome: child, startingEnergy });
     }
 
     return offspring;
@@ -300,6 +340,8 @@ export class Population {
       ? fitnesses.reduce((s, f) => s + f, 0) / fitnesses.length
       : 0;
     const bestFitness = fitnesses.length > 0 ? Math.max(...fitnesses) : 0;
+    const energies = living.map(i => this.energy.get(i.genome.instanceId) ?? 0);
+    const avgEnergy = energies.length > 0 ? energies.reduce((s, e) => s + e, 0) / energies.length : 0;
 
     return {
       generation: this.generation,
@@ -308,6 +350,7 @@ export class Population {
       bestFitness: Math.round(bestFitness * 1000) / 1000,
       totalEverLived: this.lineage.tree.size,
       speciesCount: this.speciesManager.getCount(),
+      avgEnergy: Math.round(avgEnergy * 1000) / 1000,
     };
   }
 

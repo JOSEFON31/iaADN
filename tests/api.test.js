@@ -129,6 +129,12 @@ describe('API', () => {
     assert.match(page.headers['content-type'], /text\/html/);
   });
 
+  it('reports P2P status via /api/peers, disconnected when no node is configured', async () => {
+    const res = await call(api, { path: '/api/peers', headers: auth });
+    assert.equal(res.status, 200);
+    assert.deepEqual(res.json, { connected: false, peers: [] });
+  });
+
   it('returns an empty generations list when no persistence store is configured', async () => {
     const res = await call(api, { path: '/api/generations', headers: auth });
     assert.equal(res.status, 200);

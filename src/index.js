@@ -22,6 +22,10 @@ import { Recovery } from './daemon/recovery.js';
 import { HiveMind } from './hive/mind.js';
 import { API } from './integration/api.js';
 import { initRng, getSeed, rng } from './util/rng.js';
+import { IaADNNode } from './network/node.js';
+import { GenomeSync } from './network/sync.js';
+import { loadOrCreateIdentity } from './network/identity.js';
+import { validateSafetyPrompt } from './safety/rules.js';
 import { randomBytes } from 'crypto';
 import { mkdirSync, writeFileSync } from 'fs';
 import { resolve, dirname } from 'path';
@@ -38,6 +42,9 @@ class IaADN {
     this.inferenceEngine = null;
     this.iotaiBridge = null;
     this.persistenceStore = null;
+    this.identity = null; // ed25519 keypair — signs genomes this node creates (Fase 4)
+    this.p2pNode = null; // IaADNNode — null unless P2P is configured (Fase 4)
+    this.genomeSync = null;
     this.populationManager = null; // single source of truth for the population — see docs/PLAN_EVOLUCION.md §0
     this.hiveMind = null;
     this.api = null;
@@ -62,6 +69,11 @@ class IaADN {
     // 1a. API token — generated once and kept in data/config.json (owner-only
     // file). Never logged; read it deliberately with `--show-token`.
     this.apiToken = resolveApiToken(this.config);
+
+    // 1b. Node identity — an ed25519 keypair signing every genome this node
+    // creates, so a peer can tell it really came from here (Fase 4). The
+    // private key file is owner-only and never leaves this machine.
+    this.identity = loadOrCreateIdentity(resolve(this.config.paths.data, 'node.key'));
 
     // 1b. Seed the shared RNG — every mutation/crossover/selection decision
     // from here on is reproducible from this one value.
@@ -142,17 +154,44 @@ class IaADN {
     }
     this.populationManager.generation = this.persistenceStore.getLastGeneration();
 
+    // 8b. P2P networking — opt-in (see docs/PLAN_EVOLUCION.md Fase 4). Only
+    // starts a listener when peers + a shared secret are actually
+    // configured; otherwise this node stays standalone, same as before.
+    const net = this.config.network;
+    const p2pSecret = process.env.IAADN_P2P_SECRET || net.p2pSharedSecret;
+    this.p2pNode = new IaADNNode({
+      nodeId: this.nodeId,
+      identity: this.identity,
+      host: net.p2pHost,
+      port: net.port,
+      peerAddresses: net.peers,
+      sharedSecret: p2pSecret,
+    });
+    if (!simulate) await this.p2pNode.start();
+
+    this.genomeSync = new GenomeSync({
+      node: this.p2pNode,
+      population: this.populationManager,
+      lineage: this.lineage,
+    });
+    this.lineage.network = this.genomeSync;
+
+    // Adopt a genome born on a peer, once its signature and basic safety
+    // checks pass — this is the actual cross-node replication (an "island"
+    // migrating in). Never re-announced (announce: false) — otherwise it'd
+    // bounce forever between nodes that all have each other as peers.
+    this.p2pNode.onMessage('birth_announcement', (msg) => this._handleRemoteBirth(msg));
+
     // 9. Initialize hive mind
     this.hiveMind = new HiveMind({
       population: this.populationManager,
       inferenceEngine: this.inferenceEngine,
-      node: null, // P2P node — added when network layer connects
+      node: this.p2pNode,
     });
     console.log('[Boot] Hive mind initialized');
 
     // 10. Start API server (not needed for a fast simulation run)
     if (!simulate) {
-      const net = this.config.network;
       this.api = new API({
         hiveMind: this.hiveMind,
         population: this.populationManager,
@@ -161,6 +200,7 @@ class IaADN {
         guardian: this.guardian,
         killSwitch: this.killSwitch,
         persistence: this.persistenceStore,
+        p2pNode: this.p2pNode,
         nodeId: this.nodeId,
         port: net.apiPort,
         host: net.apiHost,
@@ -260,6 +300,7 @@ class IaADN {
       resources: this.guardian.getResourceStatus(),
       killSwitch: this.killSwitch.getStatus(),
       iotaiConnected: this.iotaiBridge.isConnected(),
+      p2p: this.p2pNode?.getStatus() ?? null,
     };
   }
 
@@ -274,9 +315,48 @@ class IaADN {
       iotaiBridge: this.iotaiBridge,
       auditLog: this.auditLog,
       nodeId: this.nodeId,
+      genomeSync: this.p2pNode?.connected ? this.genomeSync : null,
     });
 
     this.lifecycle.start();
+  }
+
+  // A peer announced a genome it created — verify it's really theirs and
+  // safe, then adopt it into our own population if there's room. See
+  // docs/PLAN_EVOLUCION.md Fase 4.
+  _handleRemoteBirth(msg) {
+    const envelope = msg?.data?.envelope;
+    if (!envelope) return;
+
+    let genome;
+    try {
+      ({ genome } = GenomeCodec.fromTransferFormat(envelope, { requireSignature: true }));
+    } catch (err) {
+      console.warn(`[P2PNode] Rejected genome from ${msg.senderId}: ${err.message}`);
+      this.auditLog.log('p2p_genome_rejected', { senderId: msg.senderId, reason: err.message });
+      return;
+    }
+
+    if (this.populationManager.instances.has(genome.instanceId)) return; // already have it
+
+    if (!validateSafetyPrompt(genome)) {
+      console.warn(`[P2PNode] Rejected genome ${genome.instanceId}: missing safety prompt`);
+      this.auditLog.log('p2p_genome_rejected', { senderId: msg.senderId, instanceId: genome.instanceId, reason: 'missing_safety_prompt' });
+      return;
+    }
+
+    const spawnCheck = this.guardian.canSpawn();
+    if (!spawnCheck.allowed) {
+      console.log(`[P2PNode] Not adopting immigrant ${genome.instanceId}: ${spawnCheck.reason}`);
+      return;
+    }
+
+    this.populationManager.addInstance(genome);
+    this.lineage.recordBirth(genome, null, { announce: false }); // don't bounce it back to the swarm
+    this.guardian.resourceLimits.registerInstance();
+    this.auditLog.logBirth(genome);
+    this.auditLog.log('p2p_genome_adopted', { senderId: msg.senderId, instanceId: genome.instanceId });
+    console.log(`[P2PNode] Adopted immigrant genome ${genome.instanceId} from ${msg.senderId} (gen ${genome.generation})`);
   }
 
   // Fast simulation mode: run many generations back-to-back with no daemon
@@ -388,6 +468,11 @@ class IaADN {
     // Stop API server
     if (this.api) {
       this.api.stop();
+    }
+
+    // Stop P2P listener
+    if (this.p2pNode) {
+      await this.p2pNode.stop();
     }
 
     // Shutdown inference engine
