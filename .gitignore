@@ -1,4 +1,4 @@
-node_modules/
+node_modules
 *.log
 .env
 
@@ -13,4 +13,5 @@ data/iaadn.db
 data/iaadn.db-wal
 data/iaadn.db-shm
 data/node.key
+data/selfedit/
 !data/**/.gitkeep

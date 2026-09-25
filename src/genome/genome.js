@@ -4,6 +4,7 @@
 import { randomBytes, createHash } from 'crypto';
 import { Chromosome } from './chromosome.js';
 import { GENE_TYPES, REASONING_MODES } from './gene.js';
+import { geneToTool, MAX_TOOLS } from '../selfprog/tools.js';
 
 export class Genome {
   constructor({
@@ -121,6 +122,17 @@ export class Genome {
   applyReasoningMode(prompt) {
     const instruction = REASONING_MODES[this.getReasoningMode()] || '';
     return instruction + prompt;
+  }
+
+  // Tools this instance wrote for itself (CODE genes), usable during tasks
+  getTools() {
+    const tools = [];
+    for (const gene of this.chromosomes.specialization?.getGenesByType(GENE_TYPES.CODE) || []) {
+      const tool = geneToTool(gene);
+      if (tool && !tools.some(t => t.name === tool.name)) tools.push(tool);
+      if (tools.length === MAX_TOOLS) break;
+    }
+    return tools;
   }
 
   // Compute a fingerprint hash of the entire genome

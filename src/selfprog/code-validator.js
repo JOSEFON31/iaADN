@@ -1,7 +1,77 @@
 // iaADN - Code Validator: static analysis for self-programmed code
-// Validates code safety before it enters the sandbox or genome
+// Validates code safety before it enters the sandbox or genome. The sandbox
+// (src/selfprog/sandbox.js) is the real boundary; this is an independent
+// first layer, so a bypass of one still has to get past the other.
 
+import * as acorn from 'acorn';
+import * as walk from 'acorn-walk';
 import { IMMUTABLE_RULES } from '../safety/rules.js';
+
+export const FORBIDDEN_IDENTIFIERS = Object.freeze([
+  'process', 'globalThis', 'global', 'require', 'module', 'exports', 'eval', 'Function',
+  'Reflect', 'Proxy', 'WeakRef', 'FinalizationRegistry', 'SharedArrayBuffer', 'Atomics',
+  'WebAssembly', 'getBuiltinModule', 'Buffer', 'fetch', 'setTimeout', 'setInterval', 'queueMicrotask',
+]);
+
+export const FORBIDDEN_PROPERTIES = Object.freeze([
+  'constructor', '__proto__', 'prototype', '__defineGetter__', '__defineSetter__',
+  '__lookupGetter__', '__lookupSetter__', 'caller', 'callee', 'mainModule', 'binding', 'dlopen',
+]);
+
+// Parse `code` and return the list of AST-level violations. `asFunctionBody`
+// allows top-level `return` (sandbox tools); source-edit patches pass false.
+export function astViolations(code, { asFunctionBody = true } = {}) {
+  let ast;
+  try {
+    ast = acorn.parse(code, {
+      ecmaVersion: 'latest',
+      sourceType: asFunctionBody ? 'script' : 'module',
+      allowReturnOutsideFunction: asFunctionBody,
+    });
+  } catch (err) {
+    return [`Syntax error: ${err.message}`];
+  }
+
+  const errors = new Set();
+  const propName = (node) => {
+    if (!node.computed && node.property.type === 'Identifier') return node.property.name;
+    if (node.computed && node.property.type === 'Literal') return String(node.property.value);
+    return null;
+  };
+
+  walk.full(ast, (node) => {
+    switch (node.type) {
+      case 'Identifier':
+        if (FORBIDDEN_IDENTIFIERS.includes(node.name)) errors.add(`Forbidden identifier: ${node.name}`);
+        break;
+      case 'MemberExpression': {
+        const name = propName(node);
+        if (name && FORBIDDEN_PROPERTIES.includes(name)) errors.add(`Forbidden property access: ${name}`);
+        break;
+      }
+      case 'Property':
+      case 'MethodDefinition':
+        if (!node.computed && node.key?.type === 'Identifier' && node.key.name === '__proto__') {
+          errors.add('Forbidden property access: __proto__');
+        }
+        break;
+      case 'ImportExpression':
+        errors.add('Dangerous pattern: dynamic import()');
+        break;
+      case 'ImportDeclaration':
+        if (asFunctionBody) errors.add('Dangerous pattern: import');
+        break;
+      case 'MetaProperty':
+        errors.add('Dangerous pattern: import.meta / new.target');
+        break;
+      case 'WithStatement':
+        errors.add('Dangerous pattern: with');
+        break;
+    }
+  });
+
+  return [...errors];
+}
 
 export class CodeValidator {
   constructor() {
@@ -18,14 +88,16 @@ export class CodeValidator {
       errors.push(`Code exceeds max length: ${code.length} > ${this.maxCodeLength}`);
     }
 
-    // 2. Forbidden API checks
+    // 2. AST analysis
+    errors.push(...astViolations(code));
+
+    // 3. Textual checks — kept as an extra layer on top of the AST
     for (const api of this.forbiddenAPIs) {
       if (code.includes(api)) {
         errors.push(`Forbidden API: ${api}`);
       }
     }
 
-    // 3. Dangerous patterns
     const dangerousPatterns = [
       { pattern: /require\s*\(/g, name: 'require()' },
       { pattern: /import\s*\(/g, name: 'dynamic import()' },
@@ -62,12 +134,12 @@ export class CodeValidator {
     }
 
     // 5. Check for string escapes that might bypass detection
-    if (code.includes('\\x') || code.includes('\\u{')) {
-      // Allow simple unicode but check for obfuscation
-      const decoded = code.replace(/\\x([0-9a-fA-F]{2})/g, (_, hex) =>
-        String.fromCharCode(parseInt(hex, 16))
-      );
-      for (const api of this.forbiddenAPIs) {
+    if (code.includes('\\x') || code.includes('\\u')) {
+      const decoded = code
+        .replace(/\\x([0-9a-fA-F]{2})/g, (_, hex) => String.fromCharCode(parseInt(hex, 16)))
+        .replace(/\\u\{?([0-9a-fA-F]{4,6})\}?/g, (_, hex) => String.fromCodePoint(parseInt(hex, 16)));
+      const suspicious = [...this.forbiddenAPIs, ...FORBIDDEN_PROPERTIES, 'process'];
+      for (const api of suspicious) {
         if (decoded.includes(api) && !code.includes(api)) {
           errors.push(`Obfuscated forbidden API detected: ${api}`);
         }
@@ -76,7 +148,7 @@ export class CodeValidator {
 
     return {
       valid: errors.length === 0,
-      errors,
+      errors: [...new Set(errors)],
       stats: {
         length: code.length,
         maxNesting: maxDepth,

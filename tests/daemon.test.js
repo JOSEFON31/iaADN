@@ -32,78 +32,97 @@ function makeHarness(bestFitness = 0.5) {
   return { best, auditLog, guardian, population, lineage: new Lineage(), addedInstances };
 }
 
-describe('AutoProgram (propose-and-test, never edits the live instance)', () => {
-  it('discards a candidate that scores worse than the parent, leaving the parent untouched', async () => {
-    const { best, guardian, auditLog, population, lineage, addedInstances } = makeHarness(0.6);
-    const originalGeneCount = best.genome.geneCount;
+// A population whose evaluator answers from a fixed table: the parent solves
+// `parentCorrect` of the shared tasks, a child carrying a tool solves
+// `childCorrect`. Real tool use is covered in tests/tools.test.js.
+function makeToolHarness({ parentCorrect, childCorrect, childSecurityFailed = false }) {
+  const harness = makeHarness(0.5);
+  const tasks = Array.from({ length: 16 }, (_, i) => ({ id: `t${i}`, domain: i < 8 ? 'math' : 'reading' }));
+  harness.runs = [];
+  harness.population.fitnessEvaluator = {
+    taskBank: { sample: () => tasks },
+    runTasks: async (genome, _engine, sample) => {
+      harness.runs.push(sample);
+      const isChild = genome.getTools().length > 0;
+      return {
+        correctCount: isChild ? childCorrect : parentCorrect,
+        securityFailed: isChild && childSecurityFailed,
+        byDomain: { math: { correct: 1, total: 8 }, reading: { correct: 6, total: 8 } },
+        results: [],
+      };
+    },
+    evaluate: async () => ({ overall: 0.7, dimensions: {} }),
+  };
+  return harness;
+}
 
-    const autoProgram = new AutoProgram({ population, lineage, inferenceEngine: null, guardian, auditLog });
-    autoProgram.codeGenerator = {
-      generateModule: async () => ({
-        success: true,
-        gene: new Gene({ type: GENE_TYPES.CODE, name: 'test_module', value: 'return 1;' }),
-        code: 'return 1;',
-        hash: 'abc123',
-        passRate: 1,
-      }),
-    };
-    population.fitnessEvaluator.evaluate = async () => ({ overall: 0.3, dimensions: {} }); // worse than 0.6
+const passingTool = () => ({
+  generateModule: async () => ({ success: true, code: 'return 1;', hash: 'abc123', passRate: 1 }),
+});
 
-    const result = await autoProgram.run();
-
-    assert.equal(result.success, false);
-    assert.equal(result.reason, 'no_improvement');
-    assert.equal(addedInstances.length, 0, 'no new instance should be registered');
-    assert.equal(best.genome.geneCount, originalGeneCount, 'the parent genome must be untouched');
-  });
-
-  it('registers the candidate as a new instance when it does not regress', async () => {
-    const { best, guardian, auditLog, population, lineage, addedInstances } = makeHarness(0.4);
-
-    const autoProgram = new AutoProgram({ population, lineage, inferenceEngine: null, guardian, auditLog });
-    autoProgram.codeGenerator = {
-      generateModule: async () => ({
-        success: true,
-        gene: new Gene({ type: GENE_TYPES.CODE, name: 'test_module', value: 'return 1;' }),
-        code: 'return 1;',
-        hash: 'abc123',
-        passRate: 1,
-      }),
-    };
-    population.fitnessEvaluator.evaluate = async () => ({ overall: 0.55, dimensions: {} }); // better than 0.4
+describe('AutoProgram (writes a tool, keeps it only if it measurably helps)', () => {
+  it('targets the weakest domain and compares parent and child on the same tasks', async () => {
+    const h = makeToolHarness({ parentCorrect: 5, childCorrect: 7 });
+    const autoProgram = new AutoProgram({ population: h.population, lineage: h.lineage, inferenceEngine: null, guardian: h.guardian, auditLog: h.auditLog });
+    autoProgram.codeGenerator = passingTool();
 
     const result = await autoProgram.run();
 
     assert.equal(result.success, true);
-    assert.equal(addedInstances.length, 1);
-    assert.equal(addedInstances[0].fitness, 0.55);
-    assert.notEqual(addedInstances[0].genome.instanceId, best.genome.instanceId, 'a new child, not the parent');
+    assert.equal(result.domain, 'math');
+    assert.equal(result.tool, 'calc');
+    assert.equal(h.runs.length, 2);
+    assert.equal(h.runs[0], h.runs[1], 'parent and candidate must be judged on the same sample');
+    assert.equal(h.addedInstances.length, 1);
+    assert.deepEqual(h.addedInstances[0].genome.getTools().map(t => t.name), ['calc']);
+    assert.equal(h.best.genome.getTools().length, 0, 'the parent genome must be untouched');
+  });
+
+  it('discards a tool that only ties the parent', async () => {
+    const h = makeToolHarness({ parentCorrect: 5, childCorrect: 5 });
+    const autoProgram = new AutoProgram({ population: h.population, lineage: h.lineage, inferenceEngine: null, guardian: h.guardian, auditLog: h.auditLog });
+    autoProgram.codeGenerator = passingTool();
+
+    const result = await autoProgram.run();
+    assert.equal(result.success, false);
+    assert.equal(result.reason, 'no_improvement');
+    assert.equal(h.addedInstances.length, 0);
+  });
+
+  it('discards a tool whose child fails a security task, however many it solves', async () => {
+    const h = makeToolHarness({ parentCorrect: 5, childCorrect: 15, childSecurityFailed: true });
+    const autoProgram = new AutoProgram({ population: h.population, lineage: h.lineage, inferenceEngine: null, guardian: h.guardian, auditLog: h.auditLog });
+    autoProgram.codeGenerator = passingTool();
+
+    const result = await autoProgram.run();
+    assert.equal(result.reason, 'no_improvement');
+    assert.equal(h.addedInstances.length, 0);
+  });
+
+  it('discards a tool that does not pass all of its unit tests', async () => {
+    const h = makeToolHarness({ parentCorrect: 5, childCorrect: 9 });
+    const autoProgram = new AutoProgram({ population: h.population, lineage: h.lineage, inferenceEngine: null, guardian: h.guardian, auditLog: h.auditLog });
+    autoProgram.codeGenerator = { generateModule: async () => ({ success: true, code: 'return 1;', hash: 'x', passRate: 0.5 }) };
+
+    const result = await autoProgram.run();
+    assert.equal(result.reason, 'tests_failed');
+    assert.equal(h.runs.length, 1, 'the child is never even evaluated');
   });
 
   it('rejects the candidate via the guardian without registering it', async () => {
-    const { auditLog, population, lineage, addedInstances } = makeHarness(0.4);
+    const h = makeToolHarness({ parentCorrect: 5, childCorrect: 9 });
     const guardian = {
       validateCode: () => ({ valid: true, errors: [] }),
       validateMutation: () => ({ valid: false, errors: ['safety prompt removed'] }),
       canSpawn: () => ({ allowed: true }),
     };
-
-    const autoProgram = new AutoProgram({ population, lineage, inferenceEngine: null, guardian, auditLog });
-    autoProgram.codeGenerator = {
-      generateModule: async () => ({
-        success: true,
-        gene: new Gene({ type: GENE_TYPES.CODE, name: 'test_module', value: 'return 1;' }),
-        code: 'return 1;',
-        hash: 'abc123',
-        passRate: 1,
-      }),
-    };
-    population.fitnessEvaluator.evaluate = async () => ({ overall: 0.9, dimensions: {} });
+    const autoProgram = new AutoProgram({ population: h.population, lineage: h.lineage, inferenceEngine: null, guardian, auditLog: h.auditLog });
+    autoProgram.codeGenerator = passingTool();
 
     const result = await autoProgram.run();
     assert.equal(result.success, false);
     assert.equal(result.reason, 'guardian_rejected');
-    assert.equal(addedInstances.length, 0);
+    assert.equal(h.addedInstances.length, 0);
   });
 });
 

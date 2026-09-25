@@ -15,7 +15,14 @@ export class IOTAIBridge {
 
   // Connect to IOTAI — dynamically import its modules
   async connect() {
-    if (!existsSync(this.iotaiPath)) {
+    let found = false;
+    try {
+      found = existsSync(this.iotaiPath);
+    } catch {
+      // Under Node's permission model (e.g. the self-edit judge) a path
+      // outside the allowed set throws instead of returning false
+    }
+    if (!found) {
       console.warn(`[IOTAIBridge] IOTAI not found at ${this.iotaiPath}, running in standalone mode`);
       this.connected = false;
       return false;

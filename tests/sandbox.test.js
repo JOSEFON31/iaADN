@@ -127,3 +127,49 @@ describe('CodeValidator', () => {
     assert.ok(result.stats.maxNesting >= 1);
   });
 });
+
+// The real escape found in the old sandbox, and variants. Each layer is
+// checked on its own: the validator must reject them, and the sandbox must
+// not hand back the host's `process` even if the validator were bypassed.
+const ESCAPES = [
+  "var F = Math.max.constructor; return F('return pro' + 'cess')().pid;",
+  "return [].constructor.constructor('return this')().process.pid;",
+  "return (() => {}).constructor('return pro' + 'cess')().pid;",
+  "return input.constructor.constructor('return pro' + 'cess')().pid;",
+  "return console.log.constructor('return pro' + 'cess')().pid;",
+  "try { null.x } catch (e) { return e['constr' + 'uctor'].constructor('return pro' + 'cess')().pid; }",
+];
+
+describe('Sandbox escape regression', () => {
+  for (const code of ESCAPES) {
+    it(`sandbox does not leak host process: ${code.slice(0, 50)}`, () => {
+      const result = new Sandbox({ timeout: 500 }).execute(code, { input: { a: 1 } });
+      assert.equal(typeof result.result, 'undefined');
+      assert.equal(result.success, false);
+    });
+  }
+
+  it('validator rejects the known escapes', () => {
+    const validator = new CodeValidator();
+    for (const code of ESCAPES) {
+      assert.equal(validator.validate(code).valid, false, code);
+    }
+  });
+
+  it('host globals are not reachable from sandboxed code', () => {
+    const result = new Sandbox().execute('return [typeof process, typeof require, typeof globalThis.process].join(",");');
+    assert.equal(result.result, 'undefined,undefined,undefined');
+  });
+
+  it('input and output are plain data copies', () => {
+    const input = { list: [1, 2, 3] };
+    const result = new Sandbox().execute('input.list.push(4); return input;', { input });
+    assert.deepEqual(result.result, { list: [1, 2, 3, 4] });
+    assert.deepEqual(input.list, [1, 2, 3]);
+  });
+
+  it('async infinite loops are cut by the timeout', () => {
+    const result = new Sandbox({ timeout: 200 }).execute('Promise.resolve().then(() => { for (let i = 0; i >= 0; i++) {} }); return 1;');
+    assert.equal(result.success, false);
+  });
+});

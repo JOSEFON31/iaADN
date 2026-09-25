@@ -84,6 +84,21 @@ const DEFAULT_CONFIG = {
     cooperationProbeSize: 2, // shared tasks used to measure agreement across the population
   },
 
+  // Self-programming: evolved tools (AutoProgram) and source self-edit (SelfEdit)
+  selfprog: {
+    evalSampleSize: 16, // tasks shared by parent and candidate in a paired comparison
+    minImprovement: 1, // candidate must solve at least this many more of them
+    selfEditEnabled: false, // off by default; also refuses to run without network isolation (fails closed)
+    selfEditInterval: 6 * 60 * 60 * 1000, // 6 hours
+    selfEditSeeds: 3, // seeded simulations per side in the source-edit judge
+    selfEditMinGain: 0.005, // mean final fitness the candidate must add over the baseline
+    selfEditGenerations: 15, // generations per judge simulation
+    selfEditTimeoutMs: 10 * 60 * 1000, // hard kill for each judge step
+    selfEditMaxPerDay: 1, // applied source edits per 24h
+    selfEditRollbackWindowMs: 15 * 60 * 1000, // a crash this soon after an edit reverts it
+    selfEditMaxCrashes: 3, // restarts inside the window before reverting
+  },
+
   // Daemon autonomous cycles
   daemon: {
     autoEvolveInterval: 30 * 60 * 1000, // 30 minutes

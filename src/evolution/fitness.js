@@ -9,6 +9,7 @@ import { getConfig } from '../config.js';
 import { TaskBank } from '../evaluation/task-bank.js';
 import { Sandbox } from '../selfprog/sandbox.js';
 import { rng } from '../util/rng.js';
+import { toolsPrompt, parseToolCall, runTool, MAX_TOOL_CALLS } from '../selfprog/tools.js';
 
 export class FitnessEvaluator {
   constructor({ taskBank = new TaskBank(), sandbox = new Sandbox(), inferenceEngine = null } = {}) {
@@ -89,17 +90,12 @@ export class FitnessEvaluator {
 
       let passed = false;
       let response = null;
+      let toolCalls = 0;
       try {
-        const result = await engine.complete(
-          [{ role: 'user', content: genome.applyReasoningMode(task.prompt) }],
-          {
-            systemPrompt: genome.getSystemPrompt(),
-            maxTokens: 200,
-            ...genome.getInferenceConfig(),
-          }
-        );
-        response = result.content;
-        tokensUsed += result.tokensGenerated || 0;
+        const answer = await this.answerTask(genome, engine, task.prompt);
+        response = answer.content;
+        tokensUsed += answer.tokensUsed;
+        toolCalls = answer.toolCalls;
         passed = !!task.verify(response, { sandbox: this.sandbox });
       } catch {
         // A failed inference or a task whose verify() throws both count as wrong
@@ -116,7 +112,7 @@ export class FitnessEvaluator {
       // response is null when inference itself threw — nothing useful to
       // record as an example in that case, so it's left out.
       if (response != null) {
-        results.push({ taskId: task.id, domain: task.domain, prompt: task.prompt, response, passed });
+        results.push({ taskId: task.id, domain: task.domain, prompt: task.prompt, response, passed, toolCalls });
       }
     }
 
@@ -129,6 +125,38 @@ export class FitnessEvaluator {
       securityFailed,
       results,
     };
+  }
+
+  // Ask the instance to solve one task. If it has evolved tools and replies
+  // with a `TOOL name {json}` line, the tool runs in the sandbox and the
+  // model is asked again with the result — so a tool changes fitness only if
+  // it actually helps. The real backend only reads user turns, so the
+  // exchange is carried inside a single user message.
+  async answerTask(genome, engine, prompt) {
+    const tools = genome.getTools();
+    const basePrompt = genome.applyReasoningMode(prompt);
+    const systemPrompt = tools.length > 0
+      ? `${genome.getSystemPrompt()}\n\n${toolsPrompt(tools)}`
+      : genome.getSystemPrompt();
+    const options = { systemPrompt, maxTokens: 200, ...genome.getInferenceConfig() };
+
+    let transcript = basePrompt;
+    let tokensUsed = 0;
+    let toolCalls = 0;
+    let result = await engine.complete([{ role: 'user', content: transcript }], options);
+    tokensUsed += result.tokensGenerated || 0;
+
+    while (tools.length > 0 && toolCalls < MAX_TOOL_CALLS) {
+      const call = parseToolCall(result.content, tools);
+      if (!call) break;
+      toolCalls++;
+      const output = runTool(this.sandbox, call.tool, call.input);
+      transcript += `\n\nYou called: TOOL ${call.tool.name} ${JSON.stringify(call.input)}\nResult: ${output}\nNow give your final answer.`;
+      result = await engine.complete([{ role: 'user', content: transcript }], options);
+      tokensUsed += result.tokensGenerated || 0;
+    }
+
+    return { content: result.content, tokensUsed, toolCalls };
   }
 
   // Kept for callers that only want the accuracy dimension in isolation

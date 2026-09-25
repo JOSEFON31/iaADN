@@ -4,6 +4,7 @@
 import { IMMUTABLE_RULES, validateSafetyPrompt, validateMutationMagnitude } from './rules.js';
 import { ResourceLimits } from './resource-limits.js';
 import { EventEmitter } from 'events';
+import { astViolations } from '../selfprog/code-validator.js';
 
 export class SafetyGuardian extends EventEmitter {
   constructor(auditLog) {
@@ -104,6 +105,8 @@ export class SafetyGuardian extends EventEmitter {
         errors.push(`Dangerous pattern detected: ${pattern.source}`);
       }
     }
+
+    errors.push(...astViolations(code));
 
     if (errors.length > 0) {
       this.emit('code_rejected', { targetPath, errors });

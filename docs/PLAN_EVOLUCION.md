@@ -297,6 +297,45 @@ correrlo aparte, en tiempo real, no en una sesión de desarrollo.
 minutos, no en 72h) y el uso de recursos por nodo queda dentro de lo que ya limitaba `ResourceLimits` desde antes
 de esta fase. Falta el aislamiento por contenedor y la prueba de resistencia de 72h.
 
+### Autoprogramación real (herramientas evolutivas + auto-edición del código) — 🟡 herramientas activas, auto-edición lista pero apagada
+
+Antes, `AutoProgram` guardaba el código que escribía como gen `CODE`, pero **nada lo ejecutaba** al resolver tareas, y
+comparaba padre e hijo sobre muestras aleatorias distintas aceptando empates: lo que "aceptaba" era ruido.
+
+- **Herramientas que se usan de verdad** (`src/selfprog/tools.js`, `FitnessEvaluator.answerTask`): el system prompt
+  lista las herramientas del genoma (máx. 3); si el modelo responde `TOOL <nombre> <json>`, la herramienta corre en el
+  sandbox, el resultado vuelve al modelo y este da la respuesta final (máx. 2 llamadas por tarea). Una herramienta
+  rota cuesta la tarea, nunca la evaluación, y el código se revalida antes de usarse (los genomas llegan también de
+  otros nodos).
+- **`AutoProgram` con comparación justa** (`src/daemon/auto-program.js`): busca el peor dominio del mejor agente, le
+  pide al modelo local una herramienta para ese dominio (`TOOL_SPECS`: `calc`, `find_numbers`, `find_sentence`,
+  `array_stats`, `word_count`) que debe pasar todos sus tests unitarios, y compara padre e hijo **sobre las mismas
+  tareas**: se queda solo si el hijo resuelve estrictamente más (`selfprog.minImprovement`) sin fallar ninguna tarea
+  de seguridad. Verificado de punta a punta con un motor guionado (`tests/tools.test.js`): escribe `calc`, lo usa y
+  pasa de 0/4 a 4/4.
+- **Auto-edición del código fuente** (`src/selfprog/self-edit.js`), sin aprobación humana pero con un juez que no
+  puede tocar: reescribe **una función** de un archivo de `IMMUTABLE_RULES.selfEditAllowlist` (operadores de
+  evolución y genes; todo lo demás está en `protectedPaths`); filtro estático con AST (mismo nombre, sin imports,
+  sin `process`/`globalThis`/`eval`/`Function`/`fetch`); juez en un `git worktree` aparte, dentro de un proceso sin
+  red (`unshare -rn`), con el modelo de permisos de Node (sin escrituras fuera del worktree, sin procesos hijos) y
+  timeout: toda la suite debe pasar y simulaciones sembradas deben terminar con fitness **estrictamente mayor** que
+  el código sin cambiar en las mismas semillas, sin extinción ni pérdida en el test oculto. Si se acepta: commit local
+  (autor "iaADN self-edit", nunca push) en la rama `evolved`, fast-forward del checkout vivo, y el boot guard
+  (`src/selfprog/boot-guard.js`) lo revierte si el programa se reinicia más de `selfEditMaxCrashes` veces dentro de la
+  ventana. Sin aislamiento de red disponible, no corre (falla cerrado). Verificado en `tests/selfedit.test.js` con el
+  juez real: un parche que rompe tests se rechaza, uno sin mejora se rechaza (puntajes idénticos: las simulaciones son
+  deterministas), uno aceptado queda en `evolved` y el boot guard lo revierte.
+- **Qué falta para encenderla (decisión del dueño, a propósito no está conectada):** registrar `SelfEdit.run()` como
+  tarea del daemon (`src/daemon/lifecycle.js`) con `selfprog.selfEditEnabled: true`, reiniciar el proceso al aplicarse
+  un cambio (`onApplied`) y añadir `ExecStartPre=node src/selfprog/boot-guard.js` al servicio systemd. En Ubuntu 24.04
+  el `unshare -rn` sin root requiere permitir user namespaces (`kernel.apparmor_restrict_unprivileged_userns=0` o un
+  perfil de AppArmor).
+- **Límites declarados:** better-sqlite3 es un addon nativo (`--allow-addons`), y los addons no quedan sujetos al modelo
+  de permisos de Node; las fronteras fuertes del juez son el filtro estático y la red cortada. El juez simula con el
+  backend mock, así que mide la dinámica evolutiva, no la calidad de las respuestas del modelo real; con Llama 3.2 1B
+  hay que esperar que casi todas las propuestas se rechacen. `src/hive/` no está en la lista editable porque la
+  simulación no lo ejercita (toda edición empataría).
+
 ### Fase 5 — Al servicio de las personas (2–3 semanas, en paralelo con 3–4)
 
 - API con autenticación (tokens), rate-limit, HTTPS (Caddy delante), sin CORS `*`.
@@ -326,8 +365,8 @@ Problemas concretos del código actual y solución:
 
 | Problema | Dónde | Solución |
 |---|---|---|
-| `vm` de Node **no es una frontera de seguridad** (se escapa vía `this.constructor.constructor`) | `src/selfprog/sandbox.js` | Ejecutar código generado en proceso aparte sin permisos (`node --experimental-permission`), `isolated-vm`, o contenedor sin red |
-| El guardian busca texto (`code.includes('eval')`); se evade con `e['v'+'al']` | `src/safety/guardian.js` | Análisis AST con `acorn` (ya es dependencia) + lista blanca de lo permitido en vez de lista negra |
+| `vm` de Node **no es una frontera de seguridad** (se escapa vía `this.constructor.constructor`) | `src/selfprog/sandbox.js` | ✅ Hecho: el escape real (`Math.max.constructor('return pro'+'cess')()` devolvía el `process` del host) está cerrado con capas independientes: ningún objeto del host entra al contexto (datos solo como JSON), `codeGeneration` desactivado, y el `vm` corre en un worker thread con límite de heap que el host mata si no responde (también corta bucles asíncronos infinitos). Tests de regresión en `tests/sandbox.test.js` |
+| El guardian busca texto (`code.includes('eval')`); se evade con `e['v'+'al']` | `src/safety/guardian.js` | ✅ Hecho: análisis AST con `acorn` (`astViolations` en `src/selfprog/code-validator.js`) en el validador y el guardian; el texto queda como capa extra |
 | Regla de seguridad = substring en el prompt | `src/safety/rules.js` | Prompt de seguridad inyectado por el orquestador en tiempo de ejecución, fuera del genoma; + tareas de seguridad en el fitness |
 | Kill switch dentro del mismo proceso | `src/safety/kill-switch.js` | Kill switch externo: archivo/señal vigilada por un proceso supervisor independiente + comando remoto firmado |
 | API sin autenticación abierta a internet | `src/integration/api.js`, `deploy/firewall.sh` | ✅ Hecho: escucha solo en `127.0.0.1`, token Bearer obligatorio en `/api/*` (`--show-token` para verlo), rate-limit por IP, límite de tamaño de body, sin CORS `*`, errores internos no se filtran; acceso por túnel SSH o Caddy con HTTPS (`deploy/Caddyfile.example`) |
