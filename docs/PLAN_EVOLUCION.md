@@ -145,7 +145,7 @@ Cada fase termina con criterios de salida medibles. No pasar a la siguiente sin 
   selección, variación de génesis) pasa por este único punto.
 - Modo "simulación rápida": ciclos en segundos con un backend mock (`src/inference/mock-backend.js`),
   para probar la evolución sin LLM real. Uso: `node src/index.js --simulate=100 --seed=X`.
-- CI con `npm test` en cada push (`.github/workflows/test.yml`, Node 20.x y 22.x).
+- CI con `npm test` en cada push (`.github/workflows/test.yml`, Node 22.x y 24.x).
 
 **Salida:** reiniciar el daemon recupera exactamente la misma población (verificado); 100 generaciones
 simuladas en ~250ms (verificado, muy por debajo del objetivo de 1 min); misma semilla → misma curva de
@@ -357,7 +357,7 @@ el propio evaluador.
 | Fase 3 (LoRA) | GPU 8–12 GB (RTX 3060) o GPU en la nube por horas | 0–30 €/mes |
 | Fase 4 (multi-nodo) | 2–3 máquinas/VPS | 0–20 €/mes |
 
-Stack: Node.js 20+ (orquestador, ya existente), `node-llama-cpp`, SQLite, Python solo para entrenamiento LoRA,
+Stack: Node.js 22+ (orquestador, ya existente), `node-llama-cpp`, SQLite, Python solo para entrenamiento LoRA,
 Docker/Podman para aislamiento, libp2p para red.
 
 ---
